@@ -9,6 +9,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
+#include <chrono>
 #include <vector>
 
 namespace {
@@ -28,7 +30,7 @@ std::vector<std::string> splitList(const std::string& text) {
 void printUsage(const char* executable) {
     std::cout
         << "Usage: " << executable
-        << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N] [--uav-hybrid] [--test-shock SHOCK]\n"
+        << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N] [--uav-hybrid] [--test-shock SHOCK] [--fps N]\n"
         << "  LIST: comma-separated none,blur,low_light,noise\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
@@ -45,6 +47,7 @@ int main(int argc, char** argv) {
         int threads = 1;
         bool runUavHybrid = false;
         std::string testShock;
+        double replayFps = 0.0;
         for (int i = 1; i < argc; ++i) {
             const std::string argument = argv[i];
             if (argument == "--help" || argument == "-h") {
@@ -70,6 +73,8 @@ int main(int argc, char** argv) {
             } else if (argument == "--test-shock") {
                 testShock = value;
                 runUavHybrid = true;
+            } else if (argument == "--fps") {
+                replayFps = std::stod(value);
             } else {
                 throw std::invalid_argument("unknown argument: " + argument);
             }
@@ -81,6 +86,9 @@ int main(int argc, char** argv) {
         }
         if (threads < 1) {
             throw std::invalid_argument("--threads must be a positive integer");
+        }
+        if (replayFps < 0.0 || replayFps > 240.0) {
+            throw std::invalid_argument("--fps must be between 0 and 240");
         }
 
         cv::setUseOptimized(true);
@@ -126,6 +134,11 @@ int main(int argc, char** argv) {
                 if (state.mode == adaptive_slam::HybridPowerMode::LowCost) ++lowCostFrames;
                 else if (state.mode == adaptive_slam::HybridPowerMode::Recovery) ++recoveryFrames;
                 else if (state.mode == adaptive_slam::HybridPowerMode::VisualBypassLIO) ++bypassFrames;
+                if (replayFps > 0.0 && i + 1 < sequence.frames.size()) {
+                    const auto framePeriodMs = static_cast<int>(
+                        std::lround(1000.0 / replayFps));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(framePeriodMs));
+                }
             }
 
             std::cout << "UAV Hybrid SLAM Completed:\n"

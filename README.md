@@ -84,3 +84,67 @@ Simulate sudden optical blackout or blinding solar flare:
 .\build\cpp\Release\adaptive_slam_benchmark.exe --sequence C:\datasets\MH_01_easy --output results --uav-hybrid --test-shock blackout
 ```
 
+## WSL / Linux simulated terminal workflow
+
+This project is native C/C++ and does not require ROS. In WSL, use the terminal scripts below as the
+EcoLIVO equivalents of `roslaunch`, `rosbag play`, and `perf record`.
+
+```bash
+sudo apt install cmake build-essential libopencv-dev linux-tools-generic python3
+chmod +x scripts/generate_synthetic_euroc.py scripts/run_wsl_simulation.sh
+
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release --parallel
+```
+
+Generate a synthetic EuRoC-style sequence:
+
+```bash
+python3 scripts/generate_synthetic_euroc.py \
+  --output synthetic/euroc \
+  --frames 300 --width 640 --height 480
+```
+
+Terminal 1 starts the mapping process and writes its PID to `.eco_mapping.pid`:
+
+```bash
+./scripts/run_wsl_simulation.sh launch \
+  --sequence synthetic/euroc \
+  --output results/synthetic \
+  --uav-hybrid \
+  --fps 20 \
+  --threads 1
+```
+
+Terminal 2 “plays” the sequence by the launch script already streaming its image files to the
+benchmark. To replay the same sequence with a blackout, restart the launch process with the shock:
+
+```bash
+./scripts/run_wsl_simulation.sh launch \
+  --sequence synthetic/euroc \
+  --output results/blackout \
+  --uav-hybrid \
+  --test-shock blackout \
+  --fps 20 \
+  --threads 1
+```
+
+Terminal 3 profiles the mapping process for 30 seconds:
+
+```bash
+./scripts/run_wsl_simulation.sh profile 30 \
+  --flamegraph ~/FlameGraph
+```
+
+The profile is written to `results/perf/ecolivo_perf.data`; if FlameGraph tools are present, it also
+creates `results/perf/ecolivo_profile.svg`. Stop the mapping process with:
+
+```bash
+./scripts/run_wsl_simulation.sh stop
+```
+
+You can also inspect WSL processes directly:
+
+```bash
+ps aux | grep adaptive_slam_benchmark
+```
