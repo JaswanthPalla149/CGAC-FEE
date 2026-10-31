@@ -1,3 +1,6 @@
 /build/
 /results/
 *.user
+perf.data*
+/Testing/
+/simulated_sequence/

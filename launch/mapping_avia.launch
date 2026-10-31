@@ -1,0 +1,16 @@
+<launch>
+    <!-- Live Multi-Modal Simulation Launch for CGAC-SLAM (EcoLIVO) -->
+    <arg name="camera_topic" default="/left_camera/image" />
+    <arg name="imu_topic" default="/livox/imu" />
+    <arg name="lidar_topic" default="/livox/lidar" />
+
+    <node pkg="cgac_slam" type="cgac_mapping" name="cgacMapping" output="screen">
+        <param name="camera_topic" value="$(arg camera_topic)" />
+        <param name="imu_topic" value="$(arg imu_topic)" />
+        <param name="lidar_topic" value="$(arg lidar_topic)" />
+        <param name="fx" value="646.78" />
+        <param name="fy" value="646.66" />
+        <param name="cx" value="313.46" />
+        <param name="cy" value="261.40" />
+    </node>
+</launch>

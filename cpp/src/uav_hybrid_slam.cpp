@@ -191,7 +191,8 @@ UAVState UAVHybridSLAM::processFrame(const cv::Mat& image,
     const double stdVal = stdDevIntensity[0];
 
     bool suddenLightCollapse = (meanVal < 6.0 || meanVal > 248.0 || stdVal < 3.0);
-    double initialConfidence = suddenLightCollapse ? 0.05 : state_.confidence;
+    double initialConfidence = suddenLightCollapse ? 0.05 :
+        (state_.mode == HybridPowerMode::VisualBypassLIO ? 0.55 : state_.confidence);
 
     // 2. Controller Evaluation
     const double lidarDegeneracy = scan.has_value() && scan->points.size() < 30 ? 0.90 : 0.10;
@@ -224,6 +225,9 @@ UAVState UAVHybridSLAM::processFrame(const cv::Mat& image,
             previousPoints_ = detectCorners(processedImage, chosenMode);
             previousLandmarkIds_.assign(previousPoints_.size(), -1);
             frameMacs += previousPoints_.size() * 50;
+            state_.confidence = previousPoints_.size() >= 10 ? 1.0 : 0.0;
+            state_.visualInliers = static_cast<int>(previousPoints_.size());
+            state_.lidarInliers = lidarInliers;
         } else {
             // Lucas-Kanade tracking
             std::vector<cv::Point2f> candidatePoints;
@@ -273,14 +277,14 @@ UAVState UAVHybridSLAM::processFrame(const cv::Mat& image,
             previousRawImage_ = processedImage.clone();
             previousPoints_ = trackedNew;
             previousLandmarkIds_ = trackedIds;
-        }
 
-        // Calculate visual confidence
-        const double trackedRatio = previousPoints_.empty() ? 0.0 :
-            static_cast<double>(visualInliers) / static_cast<double>(previousPoints_.size());
-        state_.confidence = std::clamp(0.40 * trackedRatio + 0.60 * (visualInliers >= 12 ? 1.0 : 0.0), 0.0, 1.0);
-        state_.visualInliers = visualInliers;
-        state_.lidarInliers = lidarInliers;
+            // Calculate visual confidence
+            const double trackedRatio = previousPoints_.empty() ? 0.0 :
+                static_cast<double>(visualInliers) / static_cast<double>(previousPoints_.size());
+            state_.confidence = std::clamp(0.40 * trackedRatio + 0.60 * (visualInliers >= 12 ? 1.0 : 0.0), 0.0, 1.0);
+            state_.visualInliers = visualInliers;
+            state_.lidarInliers = lidarInliers;
+        }
     }
 
     const auto endTime = std::chrono::steady_clock::now();

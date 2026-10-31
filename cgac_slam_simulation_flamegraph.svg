@@ -1,0 +1,1270 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1200" height="278" onload="init(evt)" viewBox="0 0 1200 278" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1200.0" height="278.0" fill="url(#background)"  />
+<text id="title" x="600.00" y="24" >CGAC-FEE Adaptive SLAM and EcoLIVO Simulation Profile</text>
+<text id="details" x="10.00" y="261" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1090.00" y="24" >Search</text>
+<text id="ignorecase" x="1174.00" y="24" >ic</text>
+<text id="matched" x="1090.00" y="261" > </text>
+<g id="frames">
+<g >
+<title>[unknown] (37,521,036 samples, 0.02%)</title><rect x="1047.7" y="117" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1050.66" y="127.5" ></text>
+</g>
+<g >
+<title>cv::Mat::checkVector (36,800,962 samples, 0.02%)</title><rect x="550.4" y="53" width="0.2" height="15.0" fill="rgb(244,183,43)" rx="2" ry="2" />
+<text  x="553.35" y="63.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,619,154 samples, 0.02%)</title><rect x="1118.1" y="165" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1121.15" y="175.5" ></text>
+</g>
+<g >
+<title>cv::kmeans (71,109,158 samples, 0.05%)</title><rect x="391.2" y="181" width="0.6" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="394.24" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (227,832,723 samples, 0.15%)</title><rect x="281.7" y="133" width="1.7" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="284.68" y="143.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (414,977,633 samples, 0.27%)</title><rect x="391.8" y="149" width="3.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="394.79" y="159.5" ></text>
+</g>
+<g >
+<title>free (33,143,895 samples, 0.02%)</title><rect x="559.7" y="101" width="0.3" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="562.70" y="111.5" ></text>
+</g>
+<g >
+<title>cv::merge (512,822,252 samples, 0.34%)</title><rect x="1052.2" y="197" width="3.9" height="15.0" fill="rgb(251,214,51)" rx="2" ry="2" />
+<text  x="1055.17" y="207.5" ></text>
+</g>
+<g >
+<title>cv::solve (40,655,152 samples, 0.03%)</title><rect x="261.7" y="165" width="0.3" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="264.65" y="175.5" ></text>
+</g>
+<g >
+<title>std::filesystem::__cxx11::path::operator/= (42,515,606 samples, 0.03%)</title><rect x="19.1" y="165" width="0.3" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="22.10" y="175.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::getMat_ (86,216,377 samples, 0.06%)</title><rect x="269.5" y="181" width="0.6" height="15.0" fill="rgb(233,130,31)" rx="2" ry="2" />
+<text  x="272.48" y="191.5" ></text>
+</g>
+<g >
+<title>vscanf (206,738,190 samples, 0.14%)</title><rect x="1177.7" y="181" width="1.6" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1180.67" y="191.5" ></text>
+</g>
+<g >
+<title>adler32_combine64 (914,019,558 samples, 0.60%)</title><rect x="565.0" y="197" width="7.0" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="567.97" y="207.5" ></text>
+</g>
+<g >
+<title>psiginfo (206,738,190 samples, 0.14%)</title><rect x="1177.7" y="149" width="1.6" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1180.67" y="159.5" ></text>
+</g>
+<g >
+<title>_dl_debug_state (33,935,594 samples, 0.02%)</title><rect x="21.9" y="181" width="0.3" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="24.93" y="191.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (680,367,228 samples, 0.44%)</title><rect x="422.7" y="133" width="5.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="425.70" y="143.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::applyDegradation (195,766,146 samples, 0.13%)</title><rect x="560.0" y="133" width="1.5" height="15.0" fill="rgb(213,37,9)" rx="2" ry="2" />
+<text  x="562.96" y="143.5" ></text>
+</g>
+<g >
+<title>[unknown] (43,394,769 samples, 0.03%)</title><rect x="1050.9" y="181" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1053.87" y="191.5" ></text>
+</g>
+<g >
+<title>cv::LMSolver::create (1,039,769,286 samples, 0.68%)</title><rect x="287.7" y="165" width="8.0" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="290.71" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown] (37,681,649 samples, 0.02%)</title><rect x="259.7" y="117" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="262.73" y="127.5" ></text>
+</g>
+<g >
+<title>cv::NAryMatIterator::init (44,121,516 samples, 0.03%)</title><rect x="1048.9" y="197" width="0.3" height="15.0" fill="rgb(242,170,40)" rx="2" ry="2" />
+<text  x="1051.88" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (37,521,036 samples, 0.02%)</title><rect x="1047.7" y="101" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1050.66" y="111.5" ></text>
+</g>
+<g >
+<title>[unknown] (421,009,706 samples, 0.28%)</title><rect x="280.2" y="149" width="3.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="283.19" y="159.5" ></text>
+</g>
+<g >
+<title>cv::MatExpr::MatExpr (42,740,546 samples, 0.03%)</title><rect x="260.7" y="165" width="0.3" height="15.0" fill="rgb(254,228,54)" rx="2" ry="2" />
+<text  x="263.68" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::mul (43,567,573 samples, 0.03%)</title><rect x="287.7" y="149" width="0.3" height="15.0" fill="rgb(232,124,29)" rx="2" ry="2" />
+<text  x="290.71" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::getDefaultAllocator (37,509,295 samples, 0.02%)</title><rect x="427.9" y="165" width="0.3" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="430.94" y="175.5" ></text>
+</g>
+<g >
+<title>cv::_OutputArray::create (435,460,884 samples, 0.28%)</title><rect x="270.1" y="181" width="3.4" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="273.14" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,619,154 samples, 0.02%)</title><rect x="1118.1" y="181" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1121.15" y="191.5" ></text>
+</g>
+<g >
+<title>cv::utils::trace::details::Region::Region (173,605,449 samples, 0.11%)</title><rect x="11.0" y="165" width="1.3" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="14.01" y="175.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (241,031,051 samples, 0.16%)</title><rect x="551.8" y="69" width="1.8" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="554.78" y="79.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (42,870,462 samples, 0.03%)</title><rect x="267.2" y="165" width="0.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="270.17" y="175.5" ></text>
+</g>
+<g >
+<title>cv::va_intel::convertFromVASurface (253,314,370 samples, 0.17%)</title><rect x="403.6" y="149" width="1.9" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="406.58" y="159.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (1,231,784,165 samples, 0.80%)</title><rect x="418.4" y="149" width="9.5" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="421.45" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::operator= (43,683,182 samples, 0.03%)</title><rect x="260.3" y="181" width="0.4" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="263.35" y="191.5" ></text>
+</g>
+<g >
+<title>cv::calcOpticalFlowPyrLK (550,738,793 samples, 0.36%)</title><rect x="550.6" y="117" width="4.3" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="553.64" y="127.5" ></text>
+</g>
+<g >
+<title>_dl_rtld_di_serinfo (175,721,129 samples, 0.11%)</title><rect x="563.3" y="197" width="1.4" height="15.0" fill="rgb(214,45,10)" rx="2" ry="2" />
+<text  x="566.35" y="207.5" ></text>
+</g>
+<g >
+<title>cv::va_intel::convertFromVASurface (151,515,261 samples, 0.10%)</title><rect x="560.0" y="101" width="1.1" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="562.96" y="111.5" ></text>
+</g>
+<g >
+<title>cv::solvePnPRansac (328,397,042 samples, 0.21%)</title><rect x="546.5" y="69" width="2.5" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="549.48" y="79.5" ></text>
+</g>
+<g >
+<title>cv::LMSolver::create (838,754,871 samples, 0.55%)</title><rect x="544.2" y="85" width="6.4" height="15.0" fill="rgb(215,49,11)" rx="2" ry="2" />
+<text  x="547.17" y="95.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::FeatureSLAM::estimatePoseFromMap (927,398,247 samples, 0.61%)</title><rect x="543.5" y="117" width="7.1" height="15.0" fill="rgb(253,221,52)" rx="2" ry="2" />
+<text  x="546.49" y="127.5" ></text>
+</g>
+<g >
+<title>cv::utils::trace::details::TraceManager::isActivated (165,806,965 samples, 0.11%)</title><rect x="12.3" y="165" width="1.3" height="15.0" fill="rgb(235,139,33)" rx="2" ry="2" />
+<text  x="15.35" y="175.5" ></text>
+</g>
+<g >
+<title>std::__cxx11::basic_string&lt;char, std::char_traits&lt;char&gt;, std::allocator&lt;char&gt; &gt;::_M_construct&lt;__gnu_cxx::__normal_iterator&lt;char*, std::vector&lt;char, std::allocator&lt;char&gt; &gt; &gt; &gt; (44,529,387 samples, 0.03%)</title><rect x="489.9" y="181" width="0.4" height="15.0" fill="rgb(233,132,31)" rx="2" ry="2" />
+<text  x="492.93" y="191.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;double, std::allocator&lt;double&gt; &gt;::_M_default_append (86,397,995 samples, 0.06%)</title><rect x="1189.3" y="197" width="0.7" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="1192.33" y="207.5" ></text>
+</g>
+<g >
+<title>cv::Mat::getDefaultAllocator (42,653,905 samples, 0.03%)</title><rect x="260.0" y="181" width="0.3" height="15.0" fill="rgb(241,166,39)" rx="2" ry="2" />
+<text  x="263.02" y="191.5" ></text>
+</g>
+<g >
+<title>adaptive_slam_b (153,072,317,197 samples, 100.00%)</title><rect x="10.0" y="213" width="1180.0" height="15.0" fill="rgb(216,54,12)" rx="2" ry="2" />
+<text  x="13.00" y="223.5" >adaptive_slam_b</text>
+</g>
+<g >
+<title>std::deque&lt;unsigned char*, std::allocator&lt;unsigned char*&gt; &gt;::_M_insert_aux&lt;std::_Deque_iterator&lt;unsigned char*, unsigned char*&amp;, unsigned char**&gt; &gt; (5,272,352,340 samples, 3.44%)</title><rect x="490.3" y="181" width="40.6" height="15.0" fill="rgb(210,23,5)" rx="2" ry="2" />
+<text  x="493.27" y="191.5" >std..</text>
+</g>
+<g >
+<title>__nss_database_lookup (86,619,298 samples, 0.06%)</title><rect x="542.8" y="117" width="0.7" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="545.82" y="127.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::FeatureSLAM::process (2,361,125,834 samples, 1.54%)</title><rect x="541.8" y="133" width="18.2" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="544.75" y="143.5" ></text>
+</g>
+<g >
+<title>cv::parallel_for_ (414,977,633 samples, 0.27%)</title><rect x="391.8" y="181" width="3.2" height="15.0" fill="rgb(214,41,9)" rx="2" ry="2" />
+<text  x="394.79" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_attr_setschedparam (85,985,358 samples, 0.06%)</title><rect x="488.6" y="181" width="0.7" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="491.64" y="191.5" ></text>
+</g>
+<g >
+<title>[libopencv_imgcodecs.so.4.2.0] (43,286,161 samples, 0.03%)</title><rect x="10.0" y="165" width="0.3" height="15.0" fill="rgb(244,179,42)" rx="2" ry="2" />
+<text  x="13.00" y="175.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (710,487,145 samples, 0.46%)</title><rect x="13.6" y="165" width="5.5" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="16.63" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (40,655,152 samples, 0.03%)</title><rect x="261.7" y="149" width="0.3" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="264.65" y="159.5" ></text>
+</g>
+<g >
+<title>cvSetIdentity (37,371,861 samples, 0.02%)</title><rect x="432.1" y="181" width="0.3" height="15.0" fill="rgb(234,135,32)" rx="2" ry="2" />
+<text  x="435.09" y="191.5" ></text>
+</g>
+<g >
+<title>cvSVD (43,883,999 samples, 0.03%)</title><rect x="10.3" y="149" width="0.4" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="13.33" y="159.5" ></text>
+</g>
+<g >
+<title>cv::findEssentialMat (1,039,769,286 samples, 0.68%)</title><rect x="287.7" y="181" width="8.0" height="15.0" fill="rgb(248,201,48)" rx="2" ry="2" />
+<text  x="290.71" y="191.5" ></text>
+</g>
+<g >
+<title>cv::fastAtan2 (340,653,365 samples, 0.22%)</title><rect x="285.1" y="181" width="2.6" height="15.0" fill="rgb(205,1,0)" rx="2" ry="2" />
+<text  x="288.08" y="191.5" ></text>
+</g>
+<g >
+<title>cv::buildOpticalFlowPyramid (401,450,067 samples, 0.26%)</title><rect x="551.4" y="85" width="3.1" height="15.0" fill="rgb(250,210,50)" rx="2" ry="2" />
+<text  x="554.45" y="95.5" ></text>
+</g>
+<g >
+<title>png_set_read_user_transform_fn (3,468,874,812 samples, 2.27%)</title><rect x="461.9" y="181" width="26.7" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="464.90" y="191.5" >p..</text>
+</g>
+<g >
+<title>cv::hal::SVD32f (37,316,466 samples, 0.02%)</title><rect x="1051.9" y="197" width="0.3" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1054.88" y="207.5" ></text>
+</g>
+<g >
+<title>cv::KalmanFilter::correct (30,806,394,635 samples, 20.13%)</title><rect x="22.5" y="181" width="237.5" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="25.54" y="191.5" >cv::KalmanFilter::correct</text>
+</g>
+<g >
+<title>[unknown] (44,529,387 samples, 0.03%)</title><rect x="489.9" y="165" width="0.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="492.93" y="175.5" ></text>
+</g>
+<g >
+<title>expf64 (132,633,985 samples, 0.09%)</title><rect x="432.4" y="181" width="1.0" height="15.0" fill="rgb(218,63,15)" rx="2" ry="2" />
+<text  x="435.38" y="191.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (42,730,015 samples, 0.03%)</title><rect x="538.7" y="165" width="0.4" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="541.73" y="175.5" ></text>
+</g>
+<g >
+<title>cv::transpose (85,716,007 samples, 0.06%)</title><rect x="268.5" y="149" width="0.6" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="271.47" y="159.5" ></text>
+</g>
+<g >
+<title>cv::hconcat (80,155,469 samples, 0.05%)</title><rect x="390.6" y="165" width="0.6" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="393.62" y="175.5" ></text>
+</g>
+<g >
+<title>cv::calcOpticalFlowPyrLK (514,751,937 samples, 0.34%)</title><rect x="550.9" y="101" width="4.0" height="15.0" fill="rgb(237,151,36)" rx="2" ry="2" />
+<text  x="553.91" y="111.5" ></text>
+</g>
+<g >
+<title>cv::Mat::updateContinuityFlag (42,982,698 samples, 0.03%)</title><rect x="273.2" y="165" width="0.3" height="15.0" fill="rgb(230,116,27)" rx="2" ry="2" />
+<text  x="276.17" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::operator= (44,329,125 samples, 0.03%)</title><rect x="547.1" y="37" width="0.4" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="550.14" y="47.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::kind (43,796,359 samples, 0.03%)</title><rect x="264.9" y="149" width="0.3" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="267.91" y="159.5" ></text>
+</g>
+<g >
+<title>cv::goodFeaturesToTrack (624,852,288 samples, 0.41%)</title><rect x="554.9" y="101" width="4.8" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="557.88" y="111.5" ></text>
+</g>
+<g >
+<title>main (2,906,403,041 samples, 1.90%)</title><rect x="539.1" y="181" width="22.4" height="15.0" fill="rgb(243,179,42)" rx="2" ry="2" />
+<text  x="542.06" y="191.5" >m..</text>
+</g>
+<g >
+<title>acosf32x (44,344,544 samples, 0.03%)</title><rect x="22.2" y="181" width="0.3" height="15.0" fill="rgb(250,211,50)" rx="2" ry="2" />
+<text  x="25.20" y="191.5" ></text>
+</g>
+<g >
+<title>cv::solvePoly (871,691,400 samples, 0.57%)</title><rect x="289.0" y="133" width="6.7" height="15.0" fill="rgb(226,100,24)" rx="2" ry="2" />
+<text  x="292.00" y="143.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (414,977,633 samples, 0.27%)</title><rect x="391.8" y="165" width="3.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="394.79" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::operator= (38,858,297 samples, 0.03%)</title><rect x="261.4" y="149" width="0.3" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="264.35" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::create (132,683,978 samples, 0.09%)</title><rect x="271.8" y="165" width="1.0" height="15.0" fill="rgb(232,128,30)" rx="2" ry="2" />
+<text  x="274.81" y="175.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::type (88,734,049 samples, 0.06%)</title><rect x="1050.2" y="197" width="0.7" height="15.0" fill="rgb(230,117,28)" rx="2" ry="2" />
+<text  x="1053.19" y="207.5" ></text>
+</g>
+<g >
+<title>cv::setIdentity (37,371,861 samples, 0.02%)</title><rect x="432.1" y="165" width="0.3" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="435.09" y="175.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;unsigned int, std::allocator&lt;unsigned int&gt; &gt;::_M_default_append (211,406,712 samples, 0.14%)</title><rect x="549.0" y="69" width="1.6" height="15.0" fill="rgb(228,107,25)" rx="2" ry="2" />
+<text  x="552.01" y="79.5" ></text>
+</g>
+<g >
+<title>cv::KalmanFilter::correct (61,110,258,877 samples, 39.92%)</title><rect x="576.9" y="197" width="471.1" height="15.0" fill="rgb(225,95,22)" rx="2" ry="2" />
+<text  x="579.87" y="207.5" >cv::KalmanFilter::correct</text>
+</g>
+<g >
+<title>cv::Mat::convertTo (290,285,367 samples, 0.19%)</title><rect x="403.3" y="165" width="2.2" height="15.0" fill="rgb(212,33,8)" rx="2" ry="2" />
+<text  x="406.29" y="175.5" ></text>
+</g>
+<g >
+<title>cv::solvePnPRansac (882,954,943 samples, 0.58%)</title><rect x="543.8" y="101" width="6.8" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="546.83" y="111.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,220,225 samples, 0.02%)</title><rect x="553.4" y="53" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="556.37" y="63.5" ></text>
+</g>
+<g >
+<title>[unknown] (1,501,642,161 samples, 0.98%)</title><rect x="10.0" y="181" width="11.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="13.00" y="191.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (551,416,937 samples, 0.36%)</title><rect x="418.4" y="133" width="4.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="421.45" y="143.5" ></text>
+</g>
+<g >
+<title>cv::add (38,858,297 samples, 0.03%)</title><rect x="261.4" y="165" width="0.3" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="264.35" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown] (1,231,784,165 samples, 0.80%)</title><rect x="418.4" y="165" width="9.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="421.45" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::reserve (41,191,848 samples, 0.03%)</title><rect x="1048.6" y="197" width="0.3" height="15.0" fill="rgb(254,226,54)" rx="2" ry="2" />
+<text  x="1051.57" y="207.5" ></text>
+</g>
+<g >
+<title>cvSolve (212,193,858 samples, 0.14%)</title><rect x="267.5" y="165" width="1.6" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="270.50" y="175.5" ></text>
+</g>
+<g >
+<title>cv::Mat::t (42,740,546 samples, 0.03%)</title><rect x="260.7" y="181" width="0.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="263.68" y="191.5" ></text>
+</g>
+<g >
+<title>cv::hal::SVD32f (12,267,746,921 samples, 8.01%)</title><rect x="295.7" y="181" width="94.6" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="298.72" y="191.5" >cv::hal::SV..</text>
+</g>
+<g >
+<title>std::vector&lt;double, std::allocator&lt;double&gt; &gt;::emplace_back&lt;double&gt; (871,691,400 samples, 0.57%)</title><rect x="289.0" y="149" width="6.7" height="15.0" fill="rgb(205,2,0)" rx="2" ry="2" />
+<text  x="292.00" y="159.5" ></text>
+</g>
+<g >
+<title>cv::write (993,753,881 samples, 0.65%)</title><rect x="395.6" y="181" width="7.7" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="398.63" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (43,376,228 samples, 0.03%)</title><rect x="427.6" y="69" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="430.61" y="79.5" ></text>
+</g>
+<g >
+<title>cv::write (421,523,055 samples, 0.28%)</title><rect x="1066.1" y="197" width="3.3" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="1069.15" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (43,376,228 samples, 0.03%)</title><rect x="427.6" y="85" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="430.61" y="95.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,619,154 samples, 0.02%)</title><rect x="1118.1" y="149" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1121.15" y="159.5" ></text>
+</g>
+<g >
+<title>inflate (41,453,555 samples, 0.03%)</title><rect x="1071.0" y="197" width="0.3" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="1073.97" y="207.5" ></text>
+</g>
+<g >
+<title>psiginfo (206,738,190 samples, 0.14%)</title><rect x="1177.7" y="165" width="1.6" height="15.0" fill="rgb(238,154,37)" rx="2" ry="2" />
+<text  x="1180.67" y="175.5" ></text>
+</g>
+<g >
+<title>cv::solvePnPGeneric (85,511,720 samples, 0.06%)</title><rect x="547.8" y="37" width="0.6" height="15.0" fill="rgb(217,57,13)" rx="2" ry="2" />
+<text  x="550.77" y="47.5" ></text>
+</g>
+<g >
+<title>cv::cvarrToMat (213,608,985 samples, 0.14%)</title><rect x="283.4" y="181" width="1.7" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="286.44" y="191.5" ></text>
+</g>
+<g >
+<title>cv::goodFeaturesToTrack (657,996,183 samples, 0.43%)</title><rect x="554.9" y="117" width="5.1" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="557.88" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,619,154 samples, 0.02%)</title><rect x="1118.1" y="133" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1121.15" y="143.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (120,532,939 samples, 0.08%)</title><rect x="264.0" y="149" width="0.9" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="266.98" y="159.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (69,209,603 samples, 0.05%)</title><rect x="550.9" y="85" width="0.5" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="553.91" y="95.5" ></text>
+</g>
+<g >
+<title>std::_Sp_counted_base&lt; (7,685,963,288 samples, 5.02%)</title><rect x="1118.4" y="197" width="59.3" height="15.0" fill="rgb(211,31,7)" rx="2" ry="2" />
+<text  x="1121.42" y="207.5" >std::_..</text>
+</g>
+<g >
+<title>cv::copyMakeBorder (116,993,180 samples, 0.08%)</title><rect x="553.6" y="69" width="0.9" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="556.64" y="79.5" ></text>
+</g>
+<g >
+<title>__libc_start_main (2,906,403,041 samples, 1.90%)</title><rect x="539.1" y="197" width="22.4" height="15.0" fill="rgb(236,142,34)" rx="2" ry="2" />
+<text  x="542.06" y="207.5" >_..</text>
+</g>
+<g >
+<title>cvCopyMakeBorder (575,659,071 samples, 0.38%)</title><rect x="279.0" y="165" width="4.4" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="282.00" y="175.5" ></text>
+</g>
+<g >
+<title>cv::solvePnP (204,812,029 samples, 0.13%)</title><rect x="547.1" y="53" width="1.6" height="15.0" fill="rgb(245,188,45)" rx="2" ry="2" />
+<text  x="550.14" y="63.5" ></text>
+</g>
+<g >
+<title>cv::SVD::operator (212,193,858 samples, 0.14%)</title><rect x="267.5" y="181" width="1.6" height="15.0" fill="rgb(223,83,20)" rx="2" ry="2" />
+<text  x="270.50" y="191.5" ></text>
+</g>
+<g >
+<title>cv::MatOp::augAssignXor (79,513,449 samples, 0.05%)</title><rect x="261.4" y="181" width="0.6" height="15.0" fill="rgb(226,97,23)" rx="2" ry="2" />
+<text  x="264.35" y="191.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;cv::Mat, std::allocator&lt;cv::Mat&gt; &gt;::emplace_back&lt;cv::Mat&gt; (1,056,763,574 samples, 0.69%)</title><rect x="530.9" y="181" width="8.2" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="533.91" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (303,362,101 samples, 0.20%)</title><rect x="1045.6" y="181" width="2.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1048.61" y="191.5" ></text>
+</g>
+<g >
+<title>png_create_read_struct_2 (44,529,387 samples, 0.03%)</title><rect x="489.9" y="149" width="0.4" height="15.0" fill="rgb(244,182,43)" rx="2" ry="2" />
+<text  x="492.93" y="159.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (1,675,916,929 samples, 1.09%)</title><rect x="405.5" y="181" width="12.9" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="408.53" y="191.5" ></text>
+</g>
+<g >
+<title>cvSVD (167,611,415 samples, 0.11%)</title><rect x="430.8" y="181" width="1.3" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="433.80" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,986,856 samples, 0.02%)</title><rect x="550.6" y="101" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="553.64" y="111.5" ></text>
+</g>
+<g >
+<title>cv::Mat::~Mat (38,390,582 samples, 0.03%)</title><rect x="547.5" y="37" width="0.3" height="15.0" fill="rgb(252,217,52)" rx="2" ry="2" />
+<text  x="550.48" y="47.5" ></text>
+</g>
+<g >
+<title>cv::SVD::compute (557,798,931 samples, 0.36%)</title><rect x="262.0" y="181" width="4.3" height="15.0" fill="rgb(240,162,38)" rx="2" ry="2" />
+<text  x="264.97" y="191.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (669,165,015 samples, 0.44%)</title><rect x="273.8" y="149" width="5.2" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="276.84" y="159.5" ></text>
+</g>
+<g >
+<title>std::num_put&lt;char, std::ostreambuf_iterator&lt;char, std::char_traits&lt;char&gt; &gt; &gt;::_M_pad (206,738,190 samples, 0.14%)</title><rect x="1177.7" y="197" width="1.6" height="15.0" fill="rgb(227,103,24)" rx="2" ry="2" />
+<text  x="1180.67" y="207.5" ></text>
+</g>
+<g >
+<title>inflate (3,433,914,419 samples, 2.24%)</title><rect x="434.4" y="181" width="26.5" height="15.0" fill="rgb(239,159,38)" rx="2" ry="2" />
+<text  x="437.42" y="191.5" >i..</text>
+</g>
+<g >
+<title>[unknown] (37,681,649 samples, 0.02%)</title><rect x="259.7" y="165" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="262.73" y="175.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (35,986,856 samples, 0.02%)</title><rect x="550.6" y="85" width="0.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="553.64" y="95.5" ></text>
+</g>
+<g >
+<title>cv::cornerMinEigenVal (1,244,824,086 samples, 0.81%)</title><rect x="273.8" y="181" width="9.6" height="15.0" fill="rgb(251,213,51)" rx="2" ry="2" />
+<text  x="276.84" y="191.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;float const*, std::allocator&lt;float const*&gt; &gt;::_M_realloc_insert&lt;float const*&gt; (278,295,749 samples, 0.18%)</title><rect x="19.4" y="165" width="2.2" height="15.0" fill="rgb(225,92,22)" rx="2" ry="2" />
+<text  x="22.43" y="175.5" ></text>
+</g>
+<g >
+<title>inflateCodesUsed (169,062,832 samples, 0.11%)</title><rect x="1113.0" y="197" width="1.3" height="15.0" fill="rgb(208,14,3)" rx="2" ry="2" />
+<text  x="1115.99" y="207.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::UAVHybridSLAM::processFrame (349,511,061 samples, 0.23%)</title><rect x="539.1" y="165" width="2.7" height="15.0" fill="rgb(228,109,26)" rx="2" ry="2" />
+<text  x="542.06" y="175.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (43,442,179 samples, 0.03%)</title><rect x="21.6" y="181" width="0.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="24.60" y="191.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (244,128,731 samples, 0.16%)</title><rect x="561.5" y="197" width="1.8" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="564.46" y="207.5" ></text>
+</g>
+<g >
+<title>cv::SparseMatConstIterator::operator++ (88,737,497 samples, 0.06%)</title><rect x="1049.2" y="197" width="0.7" height="15.0" fill="rgb(215,47,11)" rx="2" ry="2" />
+<text  x="1052.22" y="207.5" ></text>
+</g>
+<g >
+<title>cv::utils::trace::details::Region::Region (38,131,860 samples, 0.02%)</title><rect x="548.7" y="53" width="0.3" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="551.71" y="63.5" ></text>
+</g>
+<g >
+<title>[unknown] (43,883,999 samples, 0.03%)</title><rect x="10.3" y="165" width="0.4" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="13.33" y="175.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::getMat (44,520,449 samples, 0.03%)</title><rect x="269.1" y="181" width="0.4" height="15.0" fill="rgb(247,193,46)" rx="2" ry="2" />
+<text  x="272.13" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_attr_setschedparam (241,158,330 samples, 0.16%)</title><rect x="1116.6" y="197" width="1.8" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="1119.56" y="207.5" ></text>
+</g>
+<g >
+<title>cv::getDefaultNewCameraMatrix (86,908,058 samples, 0.06%)</title><rect x="1051.2" y="197" width="0.7" height="15.0" fill="rgb(247,197,47)" rx="2" ry="2" />
+<text  x="1054.21" y="207.5" ></text>
+</g>
+<g >
+<title>cvGoodFeaturesToTrack (1,231,784,165 samples, 0.80%)</title><rect x="418.4" y="181" width="9.5" height="15.0" fill="rgb(208,17,4)" rx="2" ry="2" />
+<text  x="421.45" y="191.5" ></text>
+</g>
+<g >
+<title>[unknown] (74,108,263 samples, 0.05%)</title><rect x="1047.4" y="165" width="0.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1050.38" y="175.5" ></text>
+</g>
+<g >
+<title>cv::phaseCorrelate (1,220,511,518 samples, 0.80%)</title><rect x="1056.4" y="197" width="9.4" height="15.0" fill="rgb(243,178,42)" rx="2" ry="2" />
+<text  x="1059.40" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (35,619,154 samples, 0.02%)</title><rect x="1118.1" y="117" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1121.15" y="127.5" ></text>
+</g>
+<g >
+<title>cv::hal::SVD32f (43,761,087 samples, 0.03%)</title><rect x="10.7" y="165" width="0.3" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="13.67" y="175.5" ></text>
+</g>
+<g >
+<title>vprintf (127,721,107 samples, 0.08%)</title><rect x="1178.3" y="133" width="1.0" height="15.0" fill="rgb(244,180,43)" rx="2" ry="2" />
+<text  x="1181.28" y="143.5" ></text>
+</g>
+<g >
+<title>_pthread_cleanup_push_defer (34,648,638 samples, 0.02%)</title><rect x="564.7" y="197" width="0.3" height="15.0" fill="rgb(206,5,1)" rx="2" ry="2" />
+<text  x="567.70" y="207.5" ></text>
+</g>
+<g >
+<title>cvMatchTemplate (34,845,447 samples, 0.02%)</title><rect x="1069.4" y="197" width="0.3" height="15.0" fill="rgb(228,106,25)" rx="2" ry="2" />
+<text  x="1072.40" y="207.5" ></text>
+</g>
+<g >
+<title>cv::utils::trace::details::Region::Region (36,580,602 samples, 0.02%)</title><rect x="548.4" y="37" width="0.3" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="551.43" y="47.5" ></text>
+</g>
+<g >
+<title>cv::transpose (132,165,006 samples, 0.09%)</title><rect x="265.2" y="149" width="1.1" height="15.0" fill="rgb(210,26,6)" rx="2" ry="2" />
+<text  x="268.25" y="159.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::kind (42,987,834 samples, 0.03%)</title><rect x="390.3" y="165" width="0.3" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="393.29" y="175.5" ></text>
+</g>
+<g >
+<title>cv::invert (170,244,497 samples, 0.11%)</title><rect x="428.2" y="165" width="1.3" height="15.0" fill="rgb(223,82,19)" rx="2" ry="2" />
+<text  x="431.23" y="175.5" ></text>
+</g>
+<g >
+<title>cvMulTransposed (125,570,423 samples, 0.08%)</title><rect x="429.5" y="181" width="1.0" height="15.0" fill="rgb(219,68,16)" rx="2" ry="2" />
+<text  x="432.55" y="191.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (84,738,464 samples, 0.06%)</title><rect x="267.8" y="149" width="0.7" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="270.82" y="159.5" ></text>
+</g>
+<g >
+<title>inflateBackEnd (86,890,559 samples, 0.06%)</title><rect x="460.9" y="181" width="0.7" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="463.89" y="191.5" ></text>
+</g>
+<g >
+<title>cv::copyMakeBorder (44,092,267 samples, 0.03%)</title><rect x="554.5" y="85" width="0.4" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="557.54" y="95.5" ></text>
+</g>
+<g >
+<title>cv::_InputArray::kind (36,734,151 samples, 0.02%)</title><rect x="1049.9" y="197" width="0.3" height="15.0" fill="rgb(211,29,7)" rx="2" ry="2" />
+<text  x="1052.91" y="207.5" ></text>
+</g>
+<g >
+<title>png_get_uint_16 (43,281,214 samples, 0.03%)</title><rect x="461.6" y="181" width="0.3" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="464.56" y="191.5" ></text>
+</g>
+<g >
+<title>cv::ocl::isOpenCLActivated (36,131,399 samples, 0.02%)</title><rect x="1056.1" y="181" width="0.3" height="15.0" fill="rgb(243,176,42)" rx="2" ry="2" />
+<text  x="1059.12" y="191.5" ></text>
+</g>
+<g >
+<title>cv::recoverPose (83,292,469 samples, 0.05%)</title><rect x="395.0" y="165" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="397.99" y="175.5" ></text>
+</g>
+<g >
+<title>adler32_z (629,280,959 samples, 0.41%)</title><rect x="572.0" y="197" width="4.9" height="15.0" fill="rgb(250,207,49)" rx="2" ry="2" />
+<text  x="575.01" y="207.5" ></text>
+</g>
+<g >
+<title>[unknown] (36,014,423 samples, 0.02%)</title><rect x="563.1" y="181" width="0.2" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="566.07" y="191.5" ></text>
+</g>
+<g >
+<title>cv::minMaxLoc (36,131,399 samples, 0.02%)</title><rect x="1056.1" y="197" width="0.3" height="15.0" fill="rgb(222,81,19)" rx="2" ry="2" />
+<text  x="1059.12" y="207.5" ></text>
+</g>
+<g >
+<title>cvInvert (207,753,792 samples, 0.14%)</title><rect x="427.9" y="181" width="1.6" height="15.0" fill="rgb(229,110,26)" rx="2" ry="2" />
+<text  x="430.94" y="191.5" ></text>
+</g>
+<g >
+<title>sincos (81,123,690 samples, 0.05%)</title><rect x="489.3" y="181" width="0.6" height="15.0" fill="rgb(232,125,30)" rx="2" ry="2" />
+<text  x="492.30" y="191.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (44,424,557 samples, 0.03%)</title><rect x="263.6" y="149" width="0.4" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="266.64" y="159.5" ></text>
+</g>
+<g >
+<title>cv::recoverPose (83,292,469 samples, 0.05%)</title><rect x="395.0" y="181" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="397.99" y="191.5" ></text>
+</g>
+<g >
+<title>cvSVD (169,714,850 samples, 0.11%)</title><rect x="1069.7" y="197" width="1.3" height="15.0" fill="rgb(230,118,28)" rx="2" ry="2" />
+<text  x="1072.66" y="207.5" ></text>
+</g>
+<g >
+<title>cvReleaseMat (37,446,415 samples, 0.02%)</title><rect x="430.5" y="181" width="0.3" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="433.51" y="191.5" ></text>
+</g>
+<g >
+<title>malloc (171,841,405 samples, 0.11%)</title><rect x="1114.3" y="197" width="1.3" height="15.0" fill="rgb(230,119,28)" rx="2" ry="2" />
+<text  x="1117.29" y="207.5" ></text>
+</g>
+<g >
+<title>cv::scalarToRawData (43,958,167 samples, 0.03%)</title><rect x="1065.8" y="197" width="0.3" height="15.0" fill="rgb(216,51,12)" rx="2" ry="2" />
+<text  x="1068.81" y="207.5" ></text>
+</g>
+<g >
+<title>cv::mulTransposed (87,107,410 samples, 0.06%)</title><rect x="429.8" y="165" width="0.7" height="15.0" fill="rgb(213,40,9)" rx="2" ry="2" />
+<text  x="432.84" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown] (38,858,297 samples, 0.03%)</title><rect x="261.4" y="101" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="264.35" y="111.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (37,681,649 samples, 0.02%)</title><rect x="259.7" y="133" width="0.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="262.73" y="143.5" ></text>
+</g>
+<g >
+<title>cv::SVD::compute&lt;double, 3, 3, 3&gt; (159,823,925 samples, 0.10%)</title><rect x="266.3" y="181" width="1.2" height="15.0" fill="rgb(238,155,37)" rx="2" ry="2" />
+<text  x="269.27" y="191.5" ></text>
+</g>
+<g >
+<title>cvConvertScale (290,285,367 samples, 0.19%)</title><rect x="403.3" y="181" width="2.2" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="406.29" y="191.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::runConfiguration (2,556,891,980 samples, 1.67%)</title><rect x="541.8" y="149" width="19.7" height="15.0" fill="rgb(224,88,21)" rx="2" ry="2" />
+<text  x="544.75" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (37,069,193 samples, 0.02%)</title><rect x="391.0" y="149" width="0.2" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="393.96" y="159.5" ></text>
+</g>
+<g >
+<title>inflateBackEnd (5,409,245,375 samples, 3.53%)</title><rect x="1071.3" y="197" width="41.7" height="15.0" fill="rgb(253,223,53)" rx="2" ry="2" />
+<text  x="1074.29" y="207.5" >inf..</text>
+</g>
+<g >
+<title>cv::_OutputArray::create (43,394,769 samples, 0.03%)</title><rect x="1050.9" y="197" width="0.3" height="15.0" fill="rgb(247,195,46)" rx="2" ry="2" />
+<text  x="1053.87" y="207.5" ></text>
+</g>
+<g >
+<title>cv::fisheye::stereoCalibrate (124,510,313 samples, 0.08%)</title><rect x="288.0" y="149" width="1.0" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="291.04" y="159.5" ></text>
+</g>
+<g >
+<title>png_get_uint_16 (122,523,969 samples, 0.08%)</title><rect x="1115.6" y="197" width="1.0" height="15.0" fill="rgb(246,190,45)" rx="2" ry="2" />
+<text  x="1118.62" y="207.5" ></text>
+</g>
+<g >
+<title>cv::Mat::deallocate (43,492,844 samples, 0.03%)</title><rect x="272.8" y="165" width="0.4" height="15.0" fill="rgb(234,134,32)" rx="2" ry="2" />
+<text  x="275.83" y="175.5" ></text>
+</g>
+<g >
+<title>cvCopyMakeBorder (499,472,322 samples, 0.33%)</title><rect x="424.1" y="117" width="3.8" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="427.09" y="127.5" ></text>
+</g>
+<g >
+<title>cv::hal::SVD32f (43,394,769 samples, 0.03%)</title><rect x="1050.9" y="165" width="0.3" height="15.0" fill="rgb(224,90,21)" rx="2" ry="2" />
+<text  x="1053.87" y="175.5" ></text>
+</g>
+<g >
+<title>cv::_OutputArray::fixedType (44,222,431 samples, 0.03%)</title><rect x="273.5" y="181" width="0.3" height="15.0" fill="rgb(243,175,41)" rx="2" ry="2" />
+<text  x="276.50" y="191.5" ></text>
+</g>
+<g >
+<title>all (153,072,317,197 samples, 100%)</title><rect x="10.0" y="229" width="1180.0" height="15.0" fill="rgb(213,39,9)" rx="2" ry="2" />
+<text  x="13.00" y="239.5" ></text>
+</g>
+<g >
+<title>[unknown] (199,609,701 samples, 0.13%)</title><rect x="426.4" y="101" width="1.5" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="429.41" y="111.5" ></text>
+</g>
+<g >
+<title>cvConvexHull2 (669,165,015 samples, 0.44%)</title><rect x="273.8" y="165" width="5.2" height="15.0" fill="rgb(222,78,18)" rx="2" ry="2" />
+<text  x="276.84" y="175.5" ></text>
+</g>
+<g >
+<title>cv::SVD::backSubst (170,244,497 samples, 0.11%)</title><rect x="428.2" y="149" width="1.3" height="15.0" fill="rgb(224,89,21)" rx="2" ry="2" />
+<text  x="431.23" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown] (37,681,649 samples, 0.02%)</title><rect x="259.7" y="149" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="262.73" y="159.5" ></text>
+</g>
+<g >
+<title>[unknown] (68,630,809,597 samples, 44.84%)</title><rect x="10.0" y="197" width="529.1" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="13.00" y="207.5" >[unknown]</text>
+</g>
+<g >
+<title>[unknown] (35,986,856 samples, 0.02%)</title><rect x="550.6" y="69" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="553.64" y="79.5" ></text>
+</g>
+<g >
+<title>[unknown] (37,867,157 samples, 0.02%)</title><rect x="283.1" y="117" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="286.14" y="127.5" ></text>
+</g>
+<g >
+<title>cv::Mat::operator= (79,780,641 samples, 0.05%)</title><rect x="1048.0" y="197" width="0.6" height="15.0" fill="rgb(236,146,34)" rx="2" ry="2" />
+<text  x="1050.95" y="207.5" ></text>
+</g>
+<g >
+<title>cv::triangulatePoints (83,292,469 samples, 0.05%)</title><rect x="395.0" y="149" width="0.6" height="15.0" fill="rgb(248,202,48)" rx="2" ry="2" />
+<text  x="397.99" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::copyTo (41,191,848 samples, 0.03%)</title><rect x="1048.6" y="181" width="0.3" height="15.0" fill="rgb(218,61,14)" rx="2" ry="2" />
+<text  x="1051.57" y="191.5" ></text>
+</g>
+<g >
+<title>adaptive_slam::runBenchmark (2,556,891,980 samples, 1.67%)</title><rect x="541.8" y="165" width="19.7" height="15.0" fill="rgb(252,217,51)" rx="2" ry="2" />
+<text  x="544.75" y="175.5" ></text>
+</g>
+<g >
+<title>[unknown] (74,108,263 samples, 0.05%)</title><rect x="1047.4" y="133" width="0.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1050.38" y="143.5" ></text>
+</g>
+<g >
+<title>std::vector&lt;cv::Mat, std::allocator&lt;cv::Mat&gt; &gt;::emplace_back&lt;cv::Mat&gt; (1,306,197,278 samples, 0.85%)</title><rect x="1179.3" y="197" width="10.0" height="15.0" fill="rgb(238,152,36)" rx="2" ry="2" />
+<text  x="1182.26" y="207.5" ></text>
+</g>
+<g >
+<title>cvSolve (557,798,931 samples, 0.36%)</title><rect x="262.0" y="165" width="4.3" height="15.0" fill="rgb(246,189,45)" rx="2" ry="2" />
+<text  x="264.97" y="175.5" ></text>
+</g>
+<g >
+<title>__nss_database_lookup (41,739,387 samples, 0.03%)</title><rect x="267.5" y="149" width="0.3" height="15.0" fill="rgb(206,7,1)" rx="2" ry="2" />
+<text  x="270.50" y="159.5" ></text>
+</g>
+<g >
+<title>cv::Mat::convertTo (151,515,261 samples, 0.10%)</title><rect x="560.0" y="117" width="1.1" height="15.0" fill="rgb(212,33,8)" rx="2" ry="2" />
+<text  x="562.96" y="127.5" ></text>
+</g>
+<g >
+<title>[unknown] (37,867,157 samples, 0.02%)</title><rect x="283.1" y="101" width="0.3" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="286.14" y="111.5" ></text>
+</g>
+<g >
+<title>[unknown] (74,108,263 samples, 0.05%)</title><rect x="1047.4" y="149" width="0.6" height="15.0" fill="rgb(210,24,5)" rx="2" ry="2" />
+<text  x="1050.38" y="159.5" ></text>
+</g>
+<g >
+<title>f64xsubf128 (132,028,380 samples, 0.09%)</title><rect x="433.4" y="181" width="1.0" height="15.0" fill="rgb(252,219,52)" rx="2" ry="2" />
+<text  x="436.41" y="191.5" ></text>
+</g>
+<g >
+<title>cv::hal::add16s (38,858,297 samples, 0.03%)</title><rect x="261.4" y="133" width="0.3" height="15.0" fill="rgb(240,161,38)" rx="2" ry="2" />
+<text  x="264.35" y="143.5" ></text>
+</g>
+<g >
+<title>cv::MatAllocator::unmap (44,205,253 samples, 0.03%)</title><rect x="261.0" y="181" width="0.4" height="15.0" fill="rgb(217,58,14)" rx="2" ry="2" />
+<text  x="264.01" y="191.5" ></text>
+</g>
+<g >
+<title>cv::va_intel::convertFromVASurface (38,858,297 samples, 0.03%)</title><rect x="261.4" y="117" width="0.3" height="15.0" fill="rgb(213,38,9)" rx="2" ry="2" />
+<text  x="264.35" y="127.5" ></text>
+</g>
+<g >
+<title>cv::hconcat (123,143,303 samples, 0.08%)</title><rect x="390.3" y="181" width="0.9" height="15.0" fill="rgb(207,13,3)" rx="2" ry="2" />
+<text  x="393.29" y="191.5" ></text>
+</g>
+<g >
+<title>cv::write (44,250,885 samples, 0.03%)</title><rect x="561.1" y="117" width="0.4" height="15.0" fill="rgb(227,101,24)" rx="2" ry="2" />
+<text  x="564.12" y="127.5" ></text>
+</g>
+</g>
+</svg>
