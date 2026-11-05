@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ "${1:-}" == "play" ]]; then
+    shift
+    bag_path="${1:-}"
+    shift || true
+    if [[ -z "$bag_path" ]]; then
+        echo "Usage: rosbag play ./bags/EcoLIVO_Retail_Street.bag" >&2
+        exit 2
+    fi
+    exec "$ROOT/scripts/run_wsl_simulation.sh" bag play "$bag_path" "$@"
+fi
+
+echo "Usage: rosbag play BAG_PATH [benchmark options]" >&2
+exit 2

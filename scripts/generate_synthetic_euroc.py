@@ -87,6 +87,24 @@ def main() -> None:
             z = 0.5 + 0.05 * math.sin(index * 0.08)
             truth.write(f"{timestamp},{x:.6f},{y:.6f},{z:.6f},0,0,0,1\n")
 
+    bag_path = sequence / "EcoLIVO_Retail_Street.bag"
+    with bag_path.open("w", encoding="ascii") as bag:
+        bag.write("# EcoLIVO synthetic rosbag manifest\n")
+        bag.write("format=ecolivo-bag/1\n")
+        bag.write(f"sequence={sequence.as_posix()}\n")
+        bag.write("camera_topic=/camera/image_raw\n")
+        bag.write("lidar_topic=/lidar/points\n")
+        bag.write("imu_topic=/imu/data\n")
+        bag.write("frame_count=" + str(args.frames) + "\n")
+        bag.write("[messages]\n")
+        bag.write("timestamp_ns,frame_path,topic\n")
+        for index in range(args.frames):
+            timestamp = index * 20_000_000
+            bag.write(
+                f"{timestamp},mav0/cam0/data/{index:06d}.pgm,"
+                "/camera/image_raw\n"
+            )
+
     print(f"Generated {args.frames} frames at {sequence}")
 
 

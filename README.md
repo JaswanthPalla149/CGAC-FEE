@@ -86,65 +86,152 @@ Simulate sudden optical blackout or blinding solar flare:
 
 ## WSL / Linux simulated terminal workflow
 
-This project is native C/C++ and does not require ROS. In WSL, use the terminal scripts below as the
-EcoLIVO equivalents of `roslaunch`, `rosbag play`, and `perf record`.
+EcoLIVO includes a complete laptop-only ROS-style simulation. It does not require a ROS installation,
+ROS master, real LiDAR, real IMU, or real camera. The simulation provides the same four steps used in
+the FAST-LIVO workflow:
+
+1. Start an EcoLIVO mapping process.
+2. Record or generate a synthetic playback bag.
+3. Play the bag frame-by-frame through the mapping process.
+4. Attach Linux `perf` and generate a flamegraph.
+
+The synthetic bag contains camera frame timestamps plus marker topics for `/camera/image_raw`,
+`/lidar/points`, and `/imu/data`. The benchmark currently synthesizes the LiDAR scan and does not
+read real sensor messages; this is a deterministic software benchmark, not a hardware sensor
+integration.
+
+### Install
+
+Ubuntu 20.04 ships CMake 3.16, while this project requires CMake 3.18 or newer:
 
 ```bash
-sudo apt install cmake build-essential libopencv-dev linux-tools-generic python3
-chmod +x scripts/generate_synthetic_euroc.py scripts/run_wsl_simulation.sh
-
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build --config Release --parallel
+sudo apt update
+sudo apt install cmake build-essential libopencv-dev linux-tools-generic \
+  linux-tools-common git python3 python3-pip
+python3 -m pip install --user cmake
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Generate a synthetic EuRoC-style sequence:
+Build once:
+
+```bash
+chmod +x scripts/*.sh scripts/*.py scripts/roslaunch scripts/rosbag
+cmake -S . -B build-wsl -DCMAKE_BUILD_TYPE=Release
+cmake --build build-wsl --parallel
+ctest --test-dir build-wsl --output-on-failure
+```
+
+Install FlameGraph tools for SVG generation:
+
+```bash
+git clone https://github.com/brendangregg/FlameGraph.git "$HOME/FlameGraph"
+```
+
+### T1: start the mapping node, FAST-LIVO launch equivalent
+
+Generate a synthetic EuRoC sequence and bag:
 
 ```bash
 python3 scripts/generate_synthetic_euroc.py \
-  --output synthetic/euroc \
-  --frames 300 --width 640 --height 480
+  --output synthetic/ecolivo-wsl \
+  --frames 300 \
+  --width 640 \
+  --height 480
 ```
 
-Terminal 1 starts the mapping process and writes its PID to `.eco_mapping.pid`:
+Start the EcoLIVO node. ROS launch arguments use `name:=value` syntax:
+
+```bash
+./scripts/roslaunch ecolivo mapping_avia.launch \
+  sequence:=synthetic/ecolivo-wsl \
+  output:=results/ecolivo \
+  uav_hybrid:=true \
+  fps:=1 \
+  threads:=1
+```
+
+This is the simulator equivalent of:
+
+```text
+roslaunch fast_livo mapping_avia.launch
+fast_livo mapping_avia.launch
+```
+
+The mapping process writes PID 1371 style information to `.eco_mapping.pid` and output to
+`.eco_mapping.log`.
+
+### T2: play the synthetic rosbag
+
+In another terminal, use the bag-compatible wrapper:
+
+```bash
+./scripts/rosbag play ./synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag
+```
+
+This is the simulator equivalent of:
+
+```bash
+rosbag play ./bags/Retail_Street.bag
+```
+
+To replay with the same bag but an illumination shock:
 
 ```bash
 ./scripts/run_wsl_simulation.sh launch \
-  --sequence synthetic/euroc \
-  --output results/synthetic \
-  --uav-hybrid \
-  --fps 20 \
-  --threads 1
-```
-
-Terminal 2 “plays” the sequence by the launch script already streaming its image files to the
-benchmark. To replay the same sequence with a blackout, restart the launch process with the shock:
-
-```bash
-./scripts/run_wsl_simulation.sh launch \
-  --sequence synthetic/euroc \
+  --sequence synthetic/ecolivo-wsl \
   --output results/blackout \
   --uav-hybrid \
   --test-shock blackout \
-  --fps 20 \
+  --fps 1 \
   --threads 1
 ```
 
-Terminal 3 profiles the mapping process for 30 seconds:
+Inspect bag metadata before playback:
 
 ```bash
-./scripts/run_wsl_simulation.sh profile 30 \
-  --flamegraph ~/FlameGraph
+./scripts/run_wsl_simulation.sh bag info \
+  ./synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag
 ```
 
-The profile is written to `results/perf/ecolivo_perf.data`; if FlameGraph tools are present, it also
-creates `results/perf/ecolivo_profile.svg`. Stop the mapping process with:
-
-```bash
-./scripts/run_wsl_simulation.sh stop
-```
-
-You can also inspect WSL processes directly:
+### T3: inspect processes and profile the mapping process
 
 ```bash
 ps aux | grep adaptive_slam_benchmark
+pgrep adaptive_slam_benchmark
+cat .eco_mapping.pid
 ```
+
+Profile PID 1371 for 30 seconds:
+
+```bash
+PID=$(pgrep adaptive_slam_benchmark | head -n 1)
+sudo perf record -F 99 -p "$PID" -g -- sleep 30
+sudo chown "$(id -u):$(id -g)" perf.data
+
+perf script -i perf.data |
+  "$HOME/FlameGraph/stackcollapse-perf.pl" |
+  "$HOME/FlameGraph/flamegraph.pl" > ecolivo_profile.svg
+```
+
+Or use the repository wrapper:
+
+```bash
+./scripts/run_wsl_simulation.sh profile 30
+```
+
+The wrapper writes:
+
+```text
+results/perf/ecolivo_perf.data
+results/perf/ecolivo_profile.svg
+```
+
+### Stop and rerun
+
+```bash
+./scripts/run_wsl_simulation.sh stop
+tail -f .eco_mapping.log
+```
+
+At `--fps 5`, 300 frames take about 60 seconds. At `--fps 1`, they take about 300 seconds and leave
+enough time for a 30-second profile. Use `--fps 0` for full-speed replay.

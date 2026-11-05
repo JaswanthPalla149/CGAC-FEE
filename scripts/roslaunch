@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+package="${1:-}"
+launch_file="${2:-}"
+shift 2 || true
+
+if [[ "$package" != "ecolivo" || "$launch_file" != "mapping_avia.launch" ]]; then
+    echo "Usage: roslaunch ecolivo mapping_avia.launch [arg:=value ...]" >&2
+    exit 2
+fi
+
+sequence=""
+output="results/ecolivo"
+fps="1"
+threads="1"
+shock=""
+uav_hybrid=true
+
+for arg in "$@"; do
+    case "$arg" in
+        sequence:=*) sequence="${arg#sequence:=}" ;;
+        output:=*) output="${arg#output:=}" ;;
+        fps:=*) fps="${arg#fps:=}" ;;
+        threads:=*) threads="${arg#threads:=}" ;;
+        test_shock:=*) shock="${arg#test_shock:=}" ;;
+        uav_hybrid:=false) uav_hybrid=false ;;
+        *) echo "Ignoring unknown launch argument: $arg" >&2 ;;
+    esac
+done
+
+if [[ -z "$sequence" ]]; then
+    echo "Missing required launch argument: sequence:=PATH" >&2
+    exit 2
+fi
+
+args=(--sequence "$sequence" --output "$output" --fps "$fps" --threads "$threads")
+if [[ "$uav_hybrid" == true ]]; then
+    args+=(--uav-hybrid)
+fi
+if [[ -n "$shock" ]]; then
+    args+=(--test-shock "$shock")
+fi
+
+exec "$ROOT/scripts/run_wsl_simulation.sh" launch "${args[@]}"

@@ -1,3 +1,11 @@
 /build/
+/build-wsl/
+/synthetic/
 /results/
+/results/perf/
+.eco_mapping.log
+.eco_mapping.pid
+perf.data
+__pycache__/
+*.pyc
 *.user

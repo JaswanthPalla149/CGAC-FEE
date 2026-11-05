@@ -49,7 +49,16 @@ int main(int argc, char** argv) {
         std::string testShock;
         double replayFps = 0.0;
         for (int i = 1; i < argc; ++i) {
-            const std::string argument = argv[i];
+            std::string argument = argv[i];
+            const std::size_t argumentFirst =
+                argument.find_first_not_of(" \t\r\n");
+            if (argumentFirst == std::string::npos) {
+                continue;
+            }
+            argument = argument.substr(argumentFirst);
+            if (argument == "\\") {
+                continue;
+            }
             if (argument == "--help" || argument == "-h") {
                 printUsage(argv[0]);
                 return 0;
@@ -61,7 +70,16 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) {
                 throw std::invalid_argument("missing value for " + argument);
             }
-            const std::string value = argv[++i];
+            std::string value = argv[++i];
+            const std::size_t valueFirst =
+                value.find_first_not_of(" \t\r\n");
+            const std::size_t valueLast =
+                value.find_last_not_of(" \t\r\n");
+            if (valueFirst != std::string::npos) {
+                value = value.substr(valueFirst, valueLast - valueFirst + 1);
+            } else {
+                value.clear();
+            }
             if (argument == "--sequence") {
                 sequencePath = value;
             } else if (argument == "--output") {

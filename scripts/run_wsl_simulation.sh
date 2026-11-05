@@ -34,6 +34,16 @@ case "$command_name" in
             fi
         fi
 
+        cleaned_args=()
+        for arg in "$@"; do
+            arg="${arg#"${arg%%[![:space:]]*}"}"
+            arg="${arg%"${arg##*[![:space:]]}"}"
+            if [[ "$arg" == "\\" || "$arg" == "" ]]; then
+                continue
+            fi
+            cleaned_args+=("$arg")
+        done
+
         executable="$(find_executable || true)"
         if [[ -z "$executable" ]]; then
             echo "Benchmark executable not found. Build it with:" >&2
@@ -43,7 +53,7 @@ case "$command_name" in
         fi
 
         cd "$ROOT"
-        "$executable" "$@" >"$ROOT/.eco_mapping.log" 2>&1 &
+        "$executable" "${cleaned_args[@]}" >"$ROOT/.eco_mapping.log" 2>&1 &
         pid=$!
         echo "$pid" >"$PID_FILE"
         echo "EcoLIVO mapping launched as PID $pid"
@@ -75,6 +85,9 @@ case "$command_name" in
                     ;;
             esac
         done
+        if [[ -z "$flamegraph" && -d "$HOME/FlameGraph" ]]; then
+            flamegraph="$HOME/FlameGraph"
+        fi
 
         if [[ ! -f "$PID_FILE" ]]; then
             echo "No PID file found. Start mapping first with: $0 launch ..." >&2
@@ -124,9 +137,64 @@ case "$command_name" in
         rm -f "$PID_FILE"
         ;;
 
+    bag)
+        bag_action="${1:-}"
+        shift || true
+        if [[ "$bag_action" == "info" ]]; then
+            bag_path="${1:-}"
+            if [[ ! -f "$bag_path" ]]; then
+                echo "Synthetic bag not found: $bag_path" >&2
+                exit 1
+            fi
+            echo "Bag: $bag_path"
+            grep -E '^format=|^sequence=|^camera_topic=|^lidar_topic=|^imu_topic=|^frame_count=' "$bag_path"
+        elif [[ "$bag_action" == "play" ]]; then
+            bag_path="${1:-}"
+            shift || true
+            if [[ -z "$bag_path" || ! -f "$bag_path" ]]; then
+                echo "Usage: $0 bag play PATH/EcoLIVO_Retail_Street.bag [OPTIONS]" >&2
+                exit 1
+            fi
+            sequence="$(grep '^sequence=' "$bag_path" | cut -d= -f2-)"
+            if [[ -z "$sequence" ]]; then
+                sequence="$(dirname "$(dirname "$bag_path")")"
+            fi
+            frame_count="$(grep '^frame_count=' "$bag_path" | cut -d= -f2-)"
+            echo "Playing synthetic bag: $bag_path"
+            echo "Topics: /camera/image_raw /lidar/points /imu/data"
+            echo "Messages: $frame_count"
+
+            fps="1"
+            for arg in "$@"; do
+                if [[ "$arg" == "--fps" ]]; then
+                    shift
+                    fps="${1:-1}"
+                    break
+                fi
+            done
+            if [[ -f "$PID_FILE" ]]; then
+                active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
+                if [[ -n "$active_pid" ]] && kill -0 "$active_pid" 2>/dev/null; then
+                    echo "[rosbag] Published $frame_count synthetic messages to active EcoLIVO mapping PID $active_pid"
+                    while kill -0 "$active_pid" 2>/dev/null; do
+                        sleep 1
+                    done
+                    echo "[rosbag] Playback complete"
+                    exit 0
+                fi
+            fi
+            exec "$0" launch --sequence "$sequence" "$@"
+        else
+            echo "Usage: $0 bag {info|play} BAG_PATH [benchmark options]" >&2
+            exit 2
+        fi
+        ;;
+
     *)
         echo "Usage:"
         echo "  $0 launch [benchmark arguments]"
+        echo "  $0 bag info BAG_PATH"
+        echo "  $0 bag play BAG_PATH [benchmark arguments]"
         echo "  $0 profile SECONDS [--flamegraph /path/to/FlameGraph]"
         echo "  $0 stop"
         exit 2
