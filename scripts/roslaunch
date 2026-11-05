@@ -25,6 +25,7 @@ for arg in "$@"; do
         fps:=*) fps="${arg#fps:=}" ;;
         threads:=*) threads="${arg#threads:=}" ;;
         test_shock:=*) shock="${arg#test_shock:=}" ;;
+        uav_hybrid:=true) uav_hybrid=true ;;
         uav_hybrid:=false) uav_hybrid=false ;;
         *) echo "Ignoring unknown launch argument: $arg" >&2 ;;
     esac
@@ -42,5 +43,4 @@ fi
 if [[ -n "$shock" ]]; then
     args+=(--test-shock "$shock")
 fi
-
 exec "$ROOT/scripts/run_wsl_simulation.sh" launch "${args[@]}"

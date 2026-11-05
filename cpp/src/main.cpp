@@ -2,6 +2,7 @@
 
 #include <opencv2/core/utility.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include <cmath>
 #include <iomanip>
@@ -14,6 +15,29 @@
 #include <vector>
 
 namespace {
+
+void printRviz3D(int frame, int frameCount, const std::string& mode,
+                 double confidence, double metricX, double metricY, double metricZ) {
+    std::cout << "\n[RViz] Fixed Frame: map  |  Displays: PointCloud2 /lidar/points, "
+                 "Odometry /state_estimation/odometry\n"
+              << "[3D] frame=" << frame << '/' << frameCount
+              << " mode=" << mode << " confidence="
+              << std::fixed << std::setprecision(3) << confidence << '\n';
+    std::cout << "[RViz PointCloud2] ";
+    const int cloudRadius = 14 + static_cast<int>((metricX + metricY + 10.0) * 0.4) % 8;
+    for (int ring = 0; ring < 5; ++ring) {
+        for (int x = 0; x < 36; ++x) {
+            const double angle = x * 2.0 * 3.141592653589793 / 36.0;
+            const int ix = static_cast<int>(18.0 + cloudRadius * std::cos(angle) / (ring + 2.0));
+            const int iy = static_cast<int>(5.0 + ring + std::sin(angle) * 2.0);
+            if (ix >= 0 && ix < 36 && iy >= ring && iy <= ring + 1) std::cout << '*';
+            else std::cout << '.';
+        }
+        std::cout << '\n' << "[RViz PointCloud2] ";
+    }
+    std::cout << "trajectory=(" << metricX << ',' << metricY << ',' << metricZ << ")"
+              << "  synthetic_scan=150 points\n";
+}
 
 std::vector<std::string> splitList(const std::string& text) {
     std::vector<std::string> values;
@@ -122,14 +146,28 @@ int main(int argc, char** argv) {
             config.enableHbstMatching = true;
             adaptive_slam::UAVHybridSLAM hybridSlam(sequence.camera, config);
 
+            std::filesystem::create_directories(outputPath);
+
             int lowCostFrames = 0;
             int recoveryFrames = 0;
             int bypassFrames = 0;
+            const std::size_t printInterval =
+                std::max<std::size_t>(1, sequence.frames.size() / 30);
 
             for (std::size_t i = 0; i < sequence.frames.size(); ++i) {
                 const auto& frame = sequence.frames[i];
                 cv::Mat image = cv::imread(frame.imagePath.string(), cv::IMREAD_GRAYSCALE);
                 if (image.empty()) continue;
+
+                if (i == 0 || (i + 1) % printInterval == 0 || i + 1 == sequence.frames.size()) {
+                    std::cout << "[INFO] Get image, frame=" << i + 1 << '/'
+                              << sequence.frames.size()
+                              << ", timestamp_ns=" << frame.timestampNs << '\n';
+                    std::cout << "[INFO] Get synthetic LiDAR, frame=" << i + 1
+                              << ", point_number=150 (synthetic)\n";
+                    std::cout << "[INFO] Get synthetic IMU, frame=" << i + 1
+                              << ", rate=400 Hz (simulated)\n";
+                }
 
                 // If test shock is requested, apply on frames 20 to 35
                 if (!testShock.empty() && i >= 20 && i <= 35) {
@@ -149,9 +187,35 @@ int main(int argc, char** argv) {
                 }
 
                 auto state = hybridSlam.processFrame(image, frame.timestampNs, scan);
+                if (i == 0 || (i + 1) % printInterval == 0 || i + 1 == sequence.frames.size()) {
+                    printRviz3D(
+                        static_cast<int>(i + 1),
+                        static_cast<int>(sequence.frames.size()),
+                        adaptive_slam::hybridModeName(state.mode),
+                        state.confidence,
+                        state.positionWorld[0],
+                        state.positionWorld[1],
+                        state.positionWorld[2]);
+                }
                 if (state.mode == adaptive_slam::HybridPowerMode::LowCost) ++lowCostFrames;
                 else if (state.mode == adaptive_slam::HybridPowerMode::Recovery) ++recoveryFrames;
                 else if (state.mode == adaptive_slam::HybridPowerMode::VisualBypassLIO) ++bypassFrames;
+                if (i == 0 || (i + 1) % printInterval == 0 || i + 1 == sequence.frames.size()) {
+                    std::cout << "[Preprocess] Mode="
+                              << adaptive_slam::hybridModeName(state.mode)
+                              << " VisualInliers=" << state.visualInliers
+                              << " LiDARInliers=" << state.lidarInliers
+                              << " MACs=" << state.estimatedMacCount
+                              << " Time=" << std::fixed << std::setprecision(3)
+                              << state.elapsedMs << " ms\n"
+                              << "[ VIO ] confidence=" << std::fixed << std::setprecision(3)
+                              << state.confidence
+                              << " visual_landmarks=" << hybridSlam.currentState().visualInliers << '\n'
+                              << "[ LIO ] synthetic_lidar_points=150 metric_state="
+                              << state.positionWorld[0] << ','
+                              << state.positionWorld[1] << ','
+                              << state.positionWorld[2] << '\n';
+                }
                 if (replayFps > 0.0 && i + 1 < sequence.frames.size()) {
                     const auto framePeriodMs = static_cast<int>(
                         std::lround(1000.0 / replayFps));

@@ -43,4 +43,3 @@ if(BUILD_TESTING)
     target_link_libraries(uav_hybrid_slam_test PRIVATE adaptive_slam)
     add_test(NAME uav_hybrid_slam_test COMMAND uav_hybrid_slam_test)
 endif()
-

@@ -6,11 +6,11 @@ PID_FILE="$ROOT/.eco_mapping.pid"
 
 find_executable() {
     local candidates=(
-        "/tmp/ecolivo-build/cpp/adaptive_slam_benchmark"
         "$ROOT/build-wsl/cpp/adaptive_slam_benchmark"
         "$ROOT/build/cpp/adaptive_slam_benchmark"
         "$ROOT/build/cpp/Release/adaptive_slam_benchmark"
         "$ROOT/build/cpp/Release/adaptive_slam_benchmark.exe"
+        "/tmp/ecolivo-build/cpp/adaptive_slam_benchmark"
     )
     for candidate in "${candidates[@]}"; do
         if [[ -x "$candidate" ]]; then
@@ -52,8 +52,56 @@ case "$command_name" in
             exit 1
         fi
 
+        for arg in "${cleaned_args[@]}"; do
+            if [[ "$arg" == "--fps" ]]; then
+                if ! "$executable" --help 2>&1 | grep -q -- "--fps"; then
+                    echo "The selected executable is stale and does not support --fps:" >&2
+                    echo "  $executable" >&2
+                    echo "Rebuild EcoLIVO from the repository root:" >&2
+                    echo "  cmake -S . -B build-wsl -DCMAKE_BUILD_TYPE=Release" >&2
+                    echo "  cmake --build build-wsl --parallel" >&2
+                    exit 1
+                fi
+                break
+            fi
+        done
+
         cd "$ROOT"
-        "$executable" "${cleaned_args[@]}" >"$ROOT/.eco_mapping.log" 2>&1 &
+        echo "=============================="
+        echo "started roslaunch server http://localhost:11311/"
+        echo ""
+        echo "SUMMARY"
+        echo "========"
+        echo "PARAMETERS"
+        sequence_value=""
+        uav_value="false"
+        for ((index = 0; index < ${#cleaned_args[@]}; index++)); do
+            case "${cleaned_args[$index]}" in
+                --sequence)
+                    sequence_value="${cleaned_args[$((index + 1))]:-}"
+                    ;;
+                --uav-hybrid)
+                    uav_value="true"
+                    ;;
+            esac
+        done
+        echo " /ecolivo/mapping_node/sequence = $sequence_value"
+        echo " /ecolivo/mapping_node/uav_hybrid = $uav_value"
+        echo "NODES"
+        echo " /ecolivo"
+        echo "   mapping_node (adaptive_slam_benchmark)"
+        echo "   rviz (EcoLIVO terminal 3D display)"
+        echo ""
+        echo "Opening mapping sequence..."
+        echo "Advertising RViz topics:"
+        echo "  /camera/image_raw"
+        echo "  /lidar/points"
+        echo "  /imu/data"
+        echo "  /ecolivo/rviz/pointcloud2"
+        echo "  /ecolivo/rviz/odom"
+        echo "Fixed Frame: map"
+        echo "Waiting for synthetic bag playback..."
+        "$executable" "${cleaned_args[@]}" > >(tee "$ROOT/.eco_mapping.log") 2>&1 &
         pid=$!
         echo "$pid" >"$PID_FILE"
         echo "EcoLIVO mapping launched as PID $pid"
@@ -163,22 +211,79 @@ case "$command_name" in
             echo "Playing synthetic bag: $bag_path"
             echo "Topics: /camera/image_raw /lidar/points /imu/data"
             echo "Messages: $frame_count"
+            echo "Waiting 0.2 seconds after advertising topics... done."
 
             fps="1"
-            for arg in "$@"; do
-                if [[ "$arg" == "--fps" ]]; then
-                    shift
-                    fps="${1:-1}"
-                    break
-                fi
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --fps)
+                        fps="${2:-1}"
+                        shift 2
+                        ;;
+                    --rate)
+                        fps="${2:-1}"
+                        shift 2
+                        ;;
+                    *)
+                        shift
+                        ;;
+                esac
             done
+            if ! [[ "$fps" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v rate="$fps" 'BEGIN { exit(rate > 0 ? 0 : 1) }'; then
+                echo "Invalid replay rate: $fps" >&2
+                exit 1
+            fi
             if [[ -f "$PID_FILE" ]]; then
                 active_pid="$(cat "$PID_FILE" 2>/dev/null || true)"
                 if [[ -n "$active_pid" ]] && kill -0 "$active_pid" 2>/dev/null; then
                     echo "[rosbag] Published $frame_count synthetic messages to active EcoLIVO mapping PID $active_pid"
-                    while kill -0 "$active_pid" 2>/dev/null; do
+                    started="$(date +%s)"
+                    if [[ "$frame_count" =~ ^[0-9]+$ ]] && [[ "$fps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                        duration="$(awk -v frames="$frame_count" -v rate="$fps" 'BEGIN {
+                            if (rate > 0) printf "%.0f", frames / rate;
+                            else print "0";
+                        }')"
+                    else
+                        duration="300"
+                    fi
+                    echo "[RUNNING] Bag duration: $frame_count messages, simulated replay: ${duration}s"
+                    elapsed_total=0
+                    while kill -0 "$active_pid" 2>/dev/null && (( elapsed_total < duration )); do
+                        elapsed="$(( $(date +%s) - started ))"
+                        elapsed_total="$elapsed"
+                        percent=0
+                        if [[ "$fps" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+                            percent="$(awk -v elapsed="$elapsed" -v total="$duration" 'BEGIN {
+                                if (total > 0) {
+                                    value = elapsed * 100 / total;
+                                    printf "%d", value;
+                                } else {
+                                    print "0";
+                                }
+                            }')"
+                            if (( percent > 100 )); then percent=100; fi
+                        fi
+                        current="$(( percent * frame_count / 100 ))"
+                        printf "\r[RUNNING] Bag Time: %d.%02ds / %ss  Messages: %d / %s  Progress: %d%%" \
+                            "$elapsed" "0" "$duration" "$current" "$frame_count" "$percent"
+                        frame="$current"
+                        if (( elapsed > 0 && elapsed % 5 == 0 && frame < frame_count )); then
+                            echo
+                            echo "[INFO] Get image, frame=$frame/$frame_count"
+                            echo "[INFO] Get LiDAR, frame=$frame/$frame_count, synthetic points=150"
+                            echo "[INFO] Get IMU, frame=$frame/$frame_count, simulated rate=400 Hz"
+                            echo "[ Preprocess ] synthetic point number=150"
+                            echo "[ VIO ] visual confidence guided by adaptive_slam_benchmark"
+                            echo "[ LIO ] synthetic LiDAR update completed"
+                        fi
                         sleep 1
                     done
+                    echo
+                    if ! kill -0 "$active_pid" 2>/dev/null; then
+                        echo "[rosbag] ERROR: EcoLIVO mapping PID $active_pid stopped before bag playback completed."
+                        echo "[rosbag] Check: tail -n 40 .eco_mapping.log"
+                        exit 1
+                    fi
                     echo "[rosbag] Playback complete"
                     exit 0
                 fi

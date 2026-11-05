@@ -121,6 +121,9 @@ cmake --build build-wsl --parallel
 ctest --test-dir build-wsl --output-on-failure
 ```
 
+Rebuild whenever C++ or wrapper source changes. This is important because WSL may otherwise select an
+existing executable from `/tmp/ecolivo-build` or an older `build-wsl` directory.
+
 Install FlameGraph tools for SVG generation:
 
 ```bash
@@ -128,6 +131,10 @@ git clone https://github.com/brendangregg/FlameGraph.git "$HOME/FlameGraph"
 ```
 
 ### T1: start the mapping node, FAST-LIVO launch equivalent
+
+Before starting, keep the shell wrappers normalized to LF and run them directly from the repository
+root. Do not paste Windows `\r` text or add a literal backslash as a command argument. The wrappers
+provide the top-level FAST-LIVO workflow while running the native C++ benchmark.
 
 Generate a synthetic EuRoC sequence and bag:
 
@@ -149,6 +156,13 @@ Start the EcoLIVO node. ROS launch arguments use `name:=value` syntax:
   fps:=1 \
   threads:=1
 ```
+
+T1 remains attached to the benchmark process and writes live terminal output to
+`.eco_mapping.log`. Keep this terminal running while T2 is played from another terminal.
+
+The launch displays a ROS-style startup summary and an RViz-equivalent 3D terminal visualization
+for synthetic LiDAR points and the estimated trajectory. This is a live terminal 3D display;
+EcoLIVO does not create video recordings.
 
 This is the simulator equivalent of:
 

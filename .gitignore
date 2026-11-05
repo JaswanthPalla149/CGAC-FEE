@@ -1,5 +1,6 @@
 /build/
 /build-wsl/
+/build-wsl-*/
 /synthetic/
 /results/
 /results/perf/
@@ -9,3 +10,7 @@ perf.data
 __pycache__/
 *.pyc
 *.user
+venv/
+.venv/
+.cache/
+*.egg-info/
