@@ -101,6 +101,11 @@ public:
     std::uint64_t totalMacOperations() const noexcept { return totalMacs_; }
     double totalEnergyJoules() const noexcept { return totalJoules_; }
 
+    const std::vector<cv::Point3d>& globalLidarMap() const noexcept { return globalLidarMap_; }
+    const std::vector<cv::Point3d>& currentScanWorld() const noexcept { return currentScanWorld_; }
+    const std::vector<cv::Point2f>& currentTrackedPoints() const noexcept { return previousPoints_; }
+    const cv::Mat& currentProcessedImage() const noexcept { return previousRawImage_; }
+
     void reset(const cv::Vec3d& initialPosition = {0.0, 0.0, 0.0});
 
 private:
@@ -118,6 +123,9 @@ private:
     std::vector<BinaryDescriptor> landmarkDescriptors_;
     HBSTTree landmarkIndex_;
 
+    std::vector<cv::Point3d> globalLidarMap_;
+    std::vector<cv::Point3d> currentScanWorld_;
+
     std::uint64_t totalMacs_{0};
     double totalJoules_{0.0};
 
@@ -125,6 +133,8 @@ private:
     cv::Mat prepareImage(const cv::Mat& image, HybridPowerMode mode) const;
     std::vector<cv::Point2f> detectCorners(const cv::Mat& image, HybridPowerMode mode) const;
     void updateLidarPoints(const LidarScan& scan, HybridPowerMode mode, int& lidarInliers);
+    bool alignLidarScan(const LidarScan& scan, cv::Matx33d& deltaR, cv::Vec3d& deltaT, int& inliers, HybridPowerMode mode);
+    void updateMap(const LidarScan& scan, const cv::Matx33d& R, const cv::Vec3d& t);
 };
 
 // Synthetic generator for testing sudden illumination collapse on UAVs (e.g. tunnel entry, solar flare)

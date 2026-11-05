@@ -2,7 +2,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs video calib3d)
+find_package(OpenCV 4 REQUIRED COMPONENTS core imgproc imgcodecs video calib3d highgui)
 
 add_library(adaptive_slam_controller src/controller.c)
 target_include_directories(adaptive_slam_controller PUBLIC include)

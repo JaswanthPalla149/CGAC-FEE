@@ -3,16 +3,51 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-if [[ "${1:-}" == "play" ]]; then
+action="${1:-}"
+if [[ "$action" == "play" ]]; then
     shift
     bag_path="${1:-}"
     shift || true
     if [[ -z "$bag_path" ]]; then
-        echo "Usage: rosbag play ./bags/EcoLIVO_Retail_Street.bag" >&2
+        echo "Usage: rosbag play PATH/EcoLIVO_Retail_Street.bag [options]" >&2
         exit 2
     fi
+    if [[ ! -f "$bag_path" && "$bag_path" == "./bags/Retail_Street.bag" ]]; then
+        bag_path="$ROOT/synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag"
+        if [[ ! -f "$bag_path" ]]; then
+            echo "Default synthetic bag not found. Generate it with:" >&2
+            echo "  python3 scripts/generate_synthetic_euroc.py --output synthetic/ecolivo-wsl --frames 300 --width 640 --height 480" >&2
+            exit 1
+        fi
+        echo "[EcoLIVO] Mapped ./bags/Retail_Street.bag to $bag_path"
+    fi
+    gui_requested=false
+    for arg in "$@"; do
+        [[ "$arg" == "--gui" ]] && gui_requested=true
+    done
+    if [[ "$gui_requested" == false ]]; then
+        exec "$ROOT/scripts/run_wsl_simulation.sh" bag play "$bag_path" --gui "$@"
+    fi
     exec "$ROOT/scripts/run_wsl_simulation.sh" bag play "$bag_path" "$@"
+elif [[ "$action" == "info" ]]; then
+    shift
+    bag_path="${1:-}"
+    shift || true
+    exec "$ROOT/scripts/run_wsl_simulation.sh" bag info "$bag_path"
+elif [[ "$action" == "extract" ]]; then
+    shift
+    bag_path="${1:-}"
+    shift || true
+    if [[ -z "$bag_path" ]]; then
+        echo "Usage: rosbag extract PATH/Retail_Street.bag [--output DIR]" >&2
+        exit 2
+    fi
+    python3 "$ROOT/scripts/rosbag_helper.py" extract "$bag_path" "$@"
+    exit 0
 fi
 
-echo "Usage: rosbag play BAG_PATH [benchmark options]" >&2
+echo "Usage:" >&2
+echo "  rosbag play BAG_PATH [--fps N]" >&2
+echo "  rosbag info BAG_PATH" >&2
+echo "  rosbag extract BAG_PATH [--output DIR]" >&2
 exit 2

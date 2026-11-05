@@ -44,6 +44,32 @@ case "$command_name" in
             cleaned_args+=("$arg")
         done
 
+        # Auto-rebuild in WSL if source files are newer than the executable
+        if command -v cmake >/dev/null 2>&1; then
+            need_build=false
+            wsl_bin="$ROOT/build-wsl/cpp/adaptive_slam_benchmark"
+            if [[ ! -f "$wsl_bin" ]]; then
+                need_build=true
+            else
+                latest_src="$(find "$ROOT/cpp" -type f \( -name "*.cpp" -o -name "*.hpp" -o -name "CMakeLists.txt" \) -newer "$wsl_bin" 2>/dev/null | head -n 1 || true)"
+                if [[ -n "$latest_src" ]]; then
+                    need_build=true
+                    echo "[EcoLIVO] Detected updated source: $latest_src"
+                fi
+            fi
+            if [[ "$need_build" == true ]]; then
+                echo "[EcoLIVO] Rebuilding adaptive_slam_benchmark in build-wsl..."
+                if [[ ! -d "$ROOT/build-wsl" ]]; then
+                    cmake -S "$ROOT" -B "$ROOT/build-wsl" -DCMAKE_BUILD_TYPE=Release
+                fi
+                cmake --build "$ROOT/build-wsl" --parallel || {
+                    echo "[EcoLIVO] Re-configuring CMake in build-wsl..."
+                    cmake -S "$ROOT" -B "$ROOT/build-wsl" -DCMAKE_BUILD_TYPE=Release
+                    cmake --build "$ROOT/build-wsl" --parallel
+                }
+            fi
+        fi
+
         executable="$(find_executable || true)"
         if [[ -z "$executable" ]]; then
             echo "Benchmark executable not found. Build it with:" >&2

@@ -11,12 +11,13 @@ if [[ "$package" != "ecolivo" || "$launch_file" != "mapping_avia.launch" ]]; the
     exit 2
 fi
 
-sequence=""
+sequence="synthetic/ecolivo-wsl"
 output="results/ecolivo"
 fps="1"
 threads="1"
 shock=""
 uav_hybrid=true
+gui=false
 
 for arg in "$@"; do
     case "$arg" in
@@ -25,15 +26,17 @@ for arg in "$@"; do
         fps:=*) fps="${arg#fps:=}" ;;
         threads:=*) threads="${arg#threads:=}" ;;
         test_shock:=*) shock="${arg#test_shock:=}" ;;
+        gui:=true) gui=true ;;
+        gui:=false) gui=false ;;
         uav_hybrid:=true) uav_hybrid=true ;;
         uav_hybrid:=false) uav_hybrid=false ;;
         *) echo "Ignoring unknown launch argument: $arg" >&2 ;;
     esac
 done
 
-if [[ -z "$sequence" ]]; then
-    echo "Missing required launch argument: sequence:=PATH" >&2
-    exit 2
+if [[ ! -d "$ROOT/$sequence" && ! -d "$sequence" ]]; then
+    echo "Warning: sequence directory '$sequence' not found. Defaulting to synthetic/ecolivo-wsl" >&2
+    sequence="synthetic/ecolivo-wsl"
 fi
 
 args=(--sequence "$sequence" --output "$output" --fps "$fps" --threads "$threads")
@@ -42,5 +45,8 @@ if [[ "$uav_hybrid" == true ]]; then
 fi
 if [[ -n "$shock" ]]; then
     args+=(--test-shock "$shock")
+fi
+if [[ "$gui" == true ]]; then
+    args+=(--gui)
 fi
 exec "$ROOT/scripts/run_wsl_simulation.sh" launch "${args[@]}"

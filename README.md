@@ -176,7 +176,14 @@ The mapping process writes PID 1371 style information to `.eco_mapping.pid` and 
 
 ### T2: play the synthetic rosbag
 
-In another terminal, use the bag-compatible wrapper:
+For the FAST-LIVO-style command shown below, WSL automatically maps
+`./bags/Retail_Street.bag` to the generated EcoLIVO synthetic bag and enables the RViz-style GUI:
+
+```bash
+./scripts/rosbag play ./bags/Retail_Street.bag --fps 1
+```
+
+The generated-bag form is also supported:
 
 ```bash
 ./scripts/rosbag play ./synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag
