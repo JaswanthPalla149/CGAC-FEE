@@ -49,6 +49,7 @@ struct FrameResult {
     double elapsedMs{};
     TrackingMode mode{TrackingMode::LowCost};
     int mapInliers{};
+    bool trackingSucceeded{};
 };
 
 struct Keyframe {
@@ -135,6 +136,7 @@ struct RunSummary {
     std::size_t keyframes{};
     std::size_t framesWithMapPose{};
     double ateRmse{std::numeric_limits<double>::quiet_NaN()};
+    double rpeTranslationRmse{std::numeric_limits<double>::quiet_NaN()};
     std::size_t trackingFailures{};
     double failureRate{};
     double meanLatencyMs{};
@@ -143,6 +145,7 @@ struct RunSummary {
     double cpuTimeSeconds{};
     std::int64_t rssDeltaBytes{};
     std::int64_t rssAfterBytes{};
+    std::int64_t peakRssBytes{};
     double recoveryFraction{};
     std::size_t modeTransitions{};
 };

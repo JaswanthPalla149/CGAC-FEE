@@ -1,6 +1,6 @@
 # Confidence-Guided Adaptive Monocular SLAM
 
-The native C/C++ implementation is built with CMake and OpenCV. It provides an adaptive monocular feature-SLAM benchmark for EuRoC MAV sequences:
+The native C/C++ implementation is built with CMake and OpenCV. It provides an adaptive monocular feature-SLAM benchmark for EuRoC-format MAV sequences:
 
 - **C controller API:** confidence-based low-cost/recovery selection with hysteresis.
 - **C++ front end:** Shi-Tomasi features, pyramidal Lucas-Kanade tracking, essential-matrix RANSAC bootstrap/fallback, two-view triangulation, and map-based PnP RANSAC.
@@ -42,7 +42,26 @@ Run all four synthetic visual conditions:
 
 `--threads` controls OpenCV's worker count and defaults to one to avoid uncontrolled CPU parallelism in power comparisons. Run each configuration under the same thread setting and machine conditions.
 
-Each run writes frame and trajectory CSVs, a map CSV with landmarks/keyframes, and `summary.csv`. Summary fields include similarity-aligned ATE, failure count/rate, latency, CPU/wall time, RSS snapshots, map sizes, and recovery-mode fraction. Energy is marked `not_measured`; latency is not a substitute for power measurement.
+Each run writes frame and trajectory CSVs, a map CSV with landmarks/keyframes, and `summary.csv`. A tracking failure is a non-initial frame where neither map-based PnP nor essential-matrix motion estimation produced a pose with at least the configured minimum inliers; the failure rate is over non-initial frames. ATE is position RMSE after one global Umeyama similarity alignment. Translation RPE is the RMSE of adjacent-frame translation increments after applying that same global alignment; it is not a full six-degree-of-freedom pose RPE. Ground truth is interpolated at image timestamps, and frames outside its timestamp range are excluded.
+
+Memory columns distinguish RSS before/after the run from `peak_rss_bytes`, the maximum process RSS sampled at frame boundaries during that run. Brief within-frame peaks may be missed; this is not a per-module allocation measurement. Energy is marked `not_measured`; latency and the UAV simulator's estimated energy are not substitutes for measured power.
+
+To compare the adaptive run with both fixed baselines from one or more summaries:
+
+```powershell
+python scripts\analyze_benchmark.py --input results\MH_01_easy\summary.csv results\MH_02_easy\summary.csv --output results\comparison.csv
+```
+
+The comparison CSV reports per-sequence/degradation deltas and marks whether adaptive dominates, is dominated, or presents a trade-off across available ATE, RPE, failure-rate, latency, and peak-RSS metrics. Missing ground truth metrics are omitted rather than treated as zero. Each input must contain unique runs for its sequence/degradation/configuration combination.
+
+To run a real EuRoC evaluation, provide the dataset locally and run the benchmark on each sequence under identical machine, thread-count, and degradation settings. The repository currently contains only a synthetic EuRoC-format sequence, not the real EuRoC dataset; its results are pipeline checks, not evidence on EuRoC.
+
+The batch runner discovers a sequence passed directly or sequences one directory below the dataset root, runs every selected degradation for all three configurations, and writes per-sequence outputs plus a combined summary and campaign manifest:
+
+```powershell
+python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root C:\datasets\EuRoC --output results\euroc_campaign --degradations none,blur,low_light,noise --threads 1
+python scripts\analyze_benchmark.py --input results\euroc_campaign\summary.csv --output results\euroc_campaign\comparisons.csv
+```
 
 ## Optimization choices and scope
 
@@ -52,7 +71,9 @@ The attached accelerator material motivates data reuse, locality, and controlled
 
 This is a research baseline, not an ORB-SLAM3 equivalent. Monocular translation scale is arbitrary. There is no loop closure, relocalization after tracking loss, bundle adjustment, place recognition, or stereo/inertial fusion. The map is incrementally triangulated and is not globally optimized, so drift and bad map points can accumulate.
 
-ATE uses timestamp-interpolated ground truth and per-run similarity alignment; this is not metric-scale ATE and can hide scale drift. Memory is reported as process RSS snapshots, not peak use. Blur, low-light, and seeded additive-noise conditions are synthetic approximations. For energy claims, use a calibrated external meter or a verified platform energy counter and document the measurement method.
+ATE and RPE use timestamp-interpolated ground truth and per-run similarity alignment; these are not metric-scale errors and can hide monocular scale drift. Blur, low-light, and seeded additive-noise conditions are synthetic approximations, not calibrated camera or environment models. The available synthetic sequence has limited scene/motion diversity. No measured-energy result is produced: use a calibrated external meter or a verified platform energy counter, document the measurement boundaries and idle-power treatment, and repeat runs before making energy claims.
+
+There is no ORB-SLAM3 integration in this repository. A defensible comparison requires a separately obtained ORB-SLAM3 checkout and its dependencies, compatible camera settings, and a documented evaluation protocol. This prototype does not implement ORB-SLAM3's loop closure, relocalization, bundle adjustment, or visual-inertial pipeline, so it must not be described as equivalent.
 
 ## C controller API
 

@@ -256,6 +256,7 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     result.activeFeatures = previousPoints_.size();
     result.inliers = inlierCount;
     result.mapInliers = mapInlierCount;
+    result.trackingSucceeded = poseUpdated;
     result.elapsedMs =
         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
                                                   start)

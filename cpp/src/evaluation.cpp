@@ -72,39 +72,45 @@ std::int64_t processRssBytes() {
     return -1;
 }
 
-std::vector<cv::Vec3d> interpolateGroundTruth(
-    const std::vector<std::int64_t>& frameTimestamps,
+std::optional<cv::Vec3d> interpolateGroundTruth(
+    std::int64_t timestamp,
     const GroundTruth& groundTruth) {
-    std::vector<cv::Vec3d> values;
-    values.reserve(frameTimestamps.size());
-    for (std::int64_t timestamp : frameTimestamps) {
-        auto upper = std::lower_bound(groundTruth.timestampsNs.begin(),
-                                      groundTruth.timestampsNs.end(), timestamp);
-        if (upper == groundTruth.timestampsNs.begin()) {
-            values.push_back(groundTruth.positions.front());
-            continue;
-        }
-        if (upper == groundTruth.timestampsNs.end()) {
-            values.push_back(groundTruth.positions.back());
-            continue;
-        }
-        const std::size_t right =
-            static_cast<std::size_t>(upper - groundTruth.timestampsNs.begin());
-        const std::size_t left = right - 1;
-        const double fraction =
-            static_cast<double>(timestamp - groundTruth.timestampsNs[left]) /
-            static_cast<double>(groundTruth.timestampsNs[right] -
-                               groundTruth.timestampsNs[left]);
-        values.push_back(groundTruth.positions[left] * (1.0 - fraction) +
-                         groundTruth.positions[right] * fraction);
+    if (groundTruth.timestampsNs.empty() ||
+        timestamp < groundTruth.timestampsNs.front() ||
+        timestamp > groundTruth.timestampsNs.back()) {
+        return std::nullopt;
     }
-    return values;
+    auto upper = std::lower_bound(groundTruth.timestampsNs.begin(),
+                                  groundTruth.timestampsNs.end(), timestamp);
+    if (upper == groundTruth.timestampsNs.end()) {
+        return groundTruth.positions.back();
+    }
+    const std::size_t right =
+        static_cast<std::size_t>(upper - groundTruth.timestampsNs.begin());
+    if (*upper == timestamp || right == 0) {
+        return groundTruth.positions[right];
+    }
+    const std::size_t left = right - 1;
+    const double fraction =
+        static_cast<double>(timestamp - groundTruth.timestampsNs[left]) /
+        static_cast<double>(groundTruth.timestampsNs[right] -
+                           groundTruth.timestampsNs[left]);
+    return groundTruth.positions[left] * (1.0 - fraction) +
+           groundTruth.positions[right] * fraction;
 }
 
-double alignedAte(const std::vector<cv::Vec3d>& estimate,
-                  const std::vector<cv::Vec3d>& target) {
+struct SimilarityAlignment {
+    double scale{};
+    cv::Matx33d rotation{};
+    cv::Vec3d estimateMean{};
+    cv::Vec3d targetMean{};
+};
+
+std::optional<SimilarityAlignment> estimateSimilarityAlignment(
+    const std::vector<cv::Vec3d>& estimate,
+    const std::vector<cv::Vec3d>& target) {
     if (estimate.size() != target.size() || estimate.size() < 3) {
-        return std::numeric_limits<double>::quiet_NaN();
+        return std::nullopt;
     }
     cv::Vec3d estimateMean(0.0, 0.0, 0.0);
     cv::Vec3d targetMean(0.0, 0.0, 0.0);
@@ -130,6 +136,9 @@ double alignedAte(const std::vector<cv::Vec3d>& estimate,
         }
     }
     variance /= static_cast<double>(estimate.size());
+    if (variance <= 1e-12) {
+        return std::nullopt;
+    }
     cv::SVD decomposition(covariance, cv::SVD::FULL_UV);
     cv::Mat correction = cv::Mat::eye(3, 3, CV_64F);
     const cv::Mat product = decomposition.u * decomposition.vt;
@@ -138,21 +147,54 @@ double alignedAte(const std::vector<cv::Vec3d>& estimate,
     const double scale =
         (decomposition.w.at<double>(0) + decomposition.w.at<double>(1) +
          decomposition.w.at<double>(2) * correction.at<double>(2, 2)) /
-        std::max(variance, 1e-12);
+        variance;
+    cv::Matx33d rotationMatrix;
+    for (int row = 0; row < 3; ++row) {
+        for (int column = 0; column < 3; ++column) {
+            rotationMatrix(row, column) = rotation.at<double>(row, column);
+        }
+    }
+    return SimilarityAlignment{scale, rotationMatrix, estimateMean, targetMean};
+}
 
+cv::Vec3d applyAlignment(const cv::Vec3d& position,
+                         const SimilarityAlignment& alignment) {
+    return alignment.scale * alignment.rotation *
+               (position - alignment.estimateMean) +
+           alignment.targetMean;
+}
+
+double alignedAte(const std::vector<cv::Vec3d>& estimate,
+                  const std::vector<cv::Vec3d>& target,
+                  const SimilarityAlignment& alignment) {
+    if (estimate.size() != target.size() || estimate.empty()) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
     double squaredError = 0.0;
     for (std::size_t i = 0; i < estimate.size(); ++i) {
-        cv::Mat source = (cv::Mat_<double>(3, 1) << estimate[i][0] - estimateMean[0],
-                          estimate[i][1] - estimateMean[1],
-                          estimate[i][2] - estimateMean[2]);
-        cv::Mat aligned = scale * rotation * source;
-        const cv::Vec3d residual(
-            aligned.at<double>(0) + targetMean[0] - target[i][0],
-            aligned.at<double>(1) + targetMean[1] - target[i][1],
-            aligned.at<double>(2) + targetMean[2] - target[i][2]);
+        const cv::Vec3d residual = applyAlignment(estimate[i], alignment) - target[i];
         squaredError += residual.dot(residual);
     }
     return std::sqrt(squaredError / static_cast<double>(estimate.size()));
+}
+
+double alignedRpeTranslationRmse(
+    const std::vector<cv::Vec3d>& estimate,
+    const std::vector<cv::Vec3d>& target,
+    const SimilarityAlignment& alignment) {
+    if (estimate.size() != target.size() || estimate.size() < 2) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    double squaredError = 0.0;
+    for (std::size_t i = 1; i < estimate.size(); ++i) {
+        const cv::Vec3d estimateDelta =
+            applyAlignment(estimate[i], alignment) -
+            applyAlignment(estimate[i - 1], alignment);
+        const cv::Vec3d targetDelta = target[i] - target[i - 1];
+        const cv::Vec3d residual = estimateDelta - targetDelta;
+        squaredError += residual.dot(residual);
+    }
+    return std::sqrt(squaredError / static_cast<double>(estimate.size() - 1));
 }
 
 void writeFrameRows(const std::filesystem::path& path,
@@ -163,7 +205,7 @@ void writeFrameRows(const std::filesystem::path& path,
     }
     output << "timestamp_ns,x,y,z,confidence,tracked_ratio,inlier_ratio,"
               "reprojection_error_px,active_features,inliers,map_inliers,"
-              "elapsed_ms,mode\n"
+              "elapsed_ms,mode,tracking_succeeded\n"
            << std::setprecision(10);
     for (const FrameResult& frame : frames) {
         output << frame.timestampNs << ',' << frame.position[0] << ','
@@ -172,7 +214,8 @@ void writeFrameRows(const std::filesystem::path& path,
                << frame.inlierRatio << ',' << frame.reprojectionErrorPx << ','
                << frame.activeFeatures << ',' << frame.inliers << ','
                << frame.mapInliers << ',' << frame.elapsedMs << ','
-               << modeName(frame.mode) << '\n';
+               << modeName(frame.mode) << ','
+               << (frame.trackingSucceeded ? 1 : 0) << '\n';
     }
 }
 
@@ -351,6 +394,7 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     results.reserve(sequence.frames.size());
     std::size_t transitions = 0;
     const std::int64_t rssBefore = processRssBytes();
+    std::int64_t peakRss = rssBefore;
     const std::clock_t cpuStart = std::clock();
     const auto wallStart = std::chrono::steady_clock::now();
 
@@ -364,6 +408,10 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
                                  seed + static_cast<std::uint32_t>(i));
         FrameResult result = slam.process(image, frame.timestampNs, mode);
         results.push_back(result);
+        const std::int64_t sampledRss = processRssBytes();
+        if (sampledRss >= 0) {
+            peakRss = std::max(peakRss, sampledRss);
+        }
         if (configuration == "adaptive") {
             const TrackingMode nextMode = controller.choose(result.confidence, mode);
             transitions += nextMode != mode ? 1U : 0U;
@@ -377,6 +425,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     const double cpuSeconds =
         static_cast<double>(std::clock() - cpuStart) / CLOCKS_PER_SEC;
     const std::int64_t rssAfter = processRssBytes();
+    if (rssAfter >= 0) {
+        peakRss = std::max(peakRss, rssAfter);
+    }
 
     RunSummary summary;
     summary.sequence = sequencePath.filename().string();
@@ -390,6 +441,7 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     summary.rssAfterBytes = rssAfter;
     summary.rssDeltaBytes =
         rssBefore >= 0 && rssAfter >= 0 ? rssAfter - rssBefore : -1;
+    summary.peakRssBytes = peakRss;
     summary.modeTransitions = transitions;
 
     std::vector<double> latencies;
@@ -402,7 +454,7 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         positions.push_back(result.position);
         timestamps.push_back(result.timestampNs);
         recoveryFrames += result.mode == TrackingMode::Recovery ? 1U : 0U;
-        if (i > 0 && result.inliers < 12) {
+        if (i > 0 && !result.trackingSucceeded) {
             ++summary.trackingFailures;
         }
         summary.framesWithMapPose += result.mapInliers >= 12 ? 1U : 0U;
@@ -423,9 +475,26 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         static_cast<double>(recoveryFrames) /
         static_cast<double>(std::max<std::size_t>(1, results.size()));
     if (sequence.groundTruth.has_value()) {
-        summary.ateRmse =
-            alignedAte(positions, interpolateGroundTruth(timestamps,
-                                                          *sequence.groundTruth));
+        std::vector<cv::Vec3d> matchedEstimates;
+        std::vector<cv::Vec3d> matchedGroundTruth;
+        matchedEstimates.reserve(positions.size());
+        matchedGroundTruth.reserve(positions.size());
+        for (std::size_t i = 0; i < timestamps.size(); ++i) {
+            const auto truth =
+                interpolateGroundTruth(timestamps[i], *sequence.groundTruth);
+            if (truth.has_value()) {
+                matchedEstimates.push_back(positions[i]);
+                matchedGroundTruth.push_back(*truth);
+            }
+        }
+        const auto alignment =
+            estimateSimilarityAlignment(matchedEstimates, matchedGroundTruth);
+        if (alignment.has_value()) {
+            summary.ateRmse =
+                alignedAte(matchedEstimates, matchedGroundTruth, *alignment);
+            summary.rpeTranslationRmse = alignedRpeTranslationRmse(
+                matchedEstimates, matchedGroundTruth, *alignment);
+        }
     }
 
     std::filesystem::create_directories(outputPath);
@@ -467,9 +536,10 @@ void writeSummaries(const std::filesystem::path& outputPath,
     }
     output << "sequence,configuration,degradation,frames,map_landmarks,keyframes,"
               "frames_with_map_pose,ate_rmse_similarity_aligned,"
+              "rpe_translation_rmse_similarity_aligned,"
               "tracking_failure_frames,tracking_failure_rate,mean_latency_ms,"
               "p95_latency_ms,wall_time_s,cpu_time_s,rss_delta_bytes,"
-              "rss_after_bytes,energy_joules,recovery_mode_fraction,"
+              "rss_after_bytes,peak_rss_bytes,energy_joules,recovery_mode_fraction,"
               "mode_transitions,monocular_scale\n"
            << std::setprecision(10);
     for (const RunSummary& summary : summaries) {
@@ -477,10 +547,12 @@ void writeSummaries(const std::filesystem::path& outputPath,
                << summary.degradation << ',' << summary.frames << ','
                << summary.landmarks << ',' << summary.keyframes << ','
                << summary.framesWithMapPose << ',' << summary.ateRmse << ','
+               << summary.rpeTranslationRmse << ','
                << summary.trackingFailures << ',' << summary.failureRate << ','
                << summary.meanLatencyMs << ',' << summary.p95LatencyMs << ','
                << summary.wallTimeSeconds << ',' << summary.cpuTimeSeconds << ','
-               << summary.rssDeltaBytes << ',' << summary.rssAfterBytes
+               << summary.rssDeltaBytes << ',' << summary.rssAfterBytes << ','
+               << summary.peakRssBytes
                << ",not_measured," << summary.recoveryFraction << ','
                << summary.modeTransitions
                << ",unknown_similarity_aligned\n";
