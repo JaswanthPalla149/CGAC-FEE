@@ -98,6 +98,14 @@ public:
             return;
         }
         status_ = "ready";
+#elif defined(__linux__)
+        std::ifstream raplFile("/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj");
+        if (raplFile.good()) {
+            status_ = "ready";
+            raplPath_ = "/sys/class/powercap/intel-rapl/intel-rapl:0/energy_uj";
+        } else {
+            status_ = "powercap_not_available";
+        }
 #endif
     }
 
@@ -122,6 +130,14 @@ public:
         }
         started_ = true;
         status_ = "started";
+#elif defined(__linux__)
+        if (!raplPath_.empty()) {
+            std::ifstream file(raplPath_);
+            if (file >> startMicroJoules_) {
+                started_ = true;
+                status_ = "started";
+            }
+        }
 #endif
     }
 
@@ -145,6 +161,19 @@ public:
         return {deltaPicoWattHours * 3.6e-9,
                 "windows_pdh_rapl_package_energy", "cpu_package_shared",
                 "measured"};
+#elif defined(__linux__)
+        if (!started_ || raplPath_.empty()) {
+            return {std::numeric_limits<double>::quiet_NaN(), "not_measured",
+                    "not_available", status_};
+        }
+        std::ifstream file(raplPath_);
+        unsigned long long endMicroJoules = 0;
+        if (!(file >> endMicroJoules) || endMicroJoules < startMicroJoules_) {
+            return {std::numeric_limits<double>::quiet_NaN(), "not_measured",
+                    "not_available", "counter_error"};
+        }
+        const double deltaJoules = static_cast<double>(endMicroJoules - startMicroJoules_) * 1e-6;
+        return {deltaJoules, "linux_sysfs_rapl_package_energy", "cpu_package_shared", "measured"};
 #else
         return {};
 #endif
@@ -190,6 +219,11 @@ private:
     PDH_HQUERY query_{};
     PDH_HCOUNTER counter_{};
     double startPicoWattHours_{};
+    bool started_{};
+    std::string status_{"counter_unavailable"};
+#elif defined(__linux__)
+    std::string raplPath_{};
+    unsigned long long startMicroJoules_{};
     bool started_{};
     std::string status_{"counter_unavailable"};
 #endif

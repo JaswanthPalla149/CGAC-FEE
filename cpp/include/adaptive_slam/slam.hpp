@@ -101,8 +101,8 @@ private:
     int minInliers_;
     int keyframeInterval_;
     cv::Mat previousRawImage_;
-    cv::Mat previousPreparedImage_;
-    TrackingMode previousPreparedMode_{TrackingMode::LowCost};
+    cv::Mat previousPreparedLowCost_;
+    cv::Mat previousPreparedRecovery_;
     std::vector<cv::Point2f> previousPoints_;
     std::vector<int> previousLandmarkIds_;
     cv::Matx33d rotationWorldCamera_{cv::Matx33d::eye()};
