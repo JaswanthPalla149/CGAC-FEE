@@ -1,8 +1,8 @@
 #include "adaptive_slam/hbst_matcher.hpp"
 #include "adaptive_slam/low_mac_features.hpp"
+#include "test_check.hpp"
 
 #include <iostream>
-#include <cassert>
 #include <random>
 
 int main() {
@@ -12,12 +12,12 @@ int main() {
     BinaryDescriptor d1, d2;
     d1.words[0] = 0x0000000000000000ULL;
     d2.words[0] = 0x000000000000000FULL; // 4 bits different
-    assert(d1.hammingDistance(d2) == 4);
+    CHECK(d1.hammingDistance(d2) == 4);
 
     d1.setBit(100, true);
-    assert(d1.getBit(100) == true);
-    assert(d2.getBit(100) == false);
-    assert(d1.hammingDistance(d2) == 5);
+    CHECK(d1.getBit(100) == true);
+    CHECK(d2.getBit(100) == false);
+    CHECK(d1.hammingDistance(d2) == 5);
 
     // 2. Test HBST Tree Construction and Query
     std::vector<BinaryDescriptor> dataset(32);
@@ -30,19 +30,19 @@ int main() {
 
     HBSTTree tree;
     tree.build(dataset);
-    assert(tree.featureCount() == 32);
+    CHECK(tree.featureCount() == 32);
 
     // Query exact match for item 17
     BinaryDescriptor query = dataset[17];
     MatchResult result = tree.query(query);
-    assert(result.feature_idx == 17);
-    assert(result.distance == 0);
+    CHECK(result.feature_idx == 17);
+    CHECK(result.distance == 0);
 
     // Query item with 1 bit difference
     query.setBit(200, !query.getBit(200));
     result = tree.query(query);
-    assert(result.feature_idx == 17);
-    assert(result.distance == 1);
+    CHECK(result.feature_idx == 17);
+    CHECK(result.distance == 1);
 
     // 3. Test Integer-Only CLAHE
     cv::Mat darkImage(120, 160, CV_8UC1, cv::Scalar(25)); // Low light image
@@ -53,17 +53,17 @@ int main() {
         }
     }
     cv::Mat enhanced = applyIntegerClahe(darkImage, 3, 4, 4);
-    assert(enhanced.size() == darkImage.size());
-    assert(enhanced.type() == CV_8UC1);
+    CHECK(enhanced.size() == darkImage.size());
+    CHECK(enhanced.type() == CV_8UC1);
     // Contrast should be expanded
     double minVal, maxVal;
     cv::minMaxLoc(enhanced, &minVal, &maxVal);
-    assert(maxVal > 60.0); // Contrast successfully equalized
+    CHECK(maxVal > 60.0);
 
     // 4. Test Low-MAC BRIEF Descriptors
     std::vector<cv::Point2f> kpts{{60.0f, 60.0f}, {80.0f, 50.0f}};
     auto descriptors = extractBinaryDescriptors(enhanced, kpts);
-    assert(descriptors.size() == 2);
+    CHECK(descriptors.size() == 2);
 
     std::cout << "All HBST & Low-MAC feature tests PASSED successfully!\n";
     return 0;

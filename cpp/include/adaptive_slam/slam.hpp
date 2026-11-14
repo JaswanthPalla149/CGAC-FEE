@@ -15,14 +15,17 @@
 
 namespace adaptive_slam {
 
+inline constexpr double kDefaultEnterRecoveryBelow = 0.48;
+inline constexpr double kDefaultExitRecoveryAbove = 0.60;
+
 enum class TrackingMode { LowCost, Recovery };
 
 const char* modeName(TrackingMode mode) noexcept;
 
 class AdaptiveController {
 public:
-    AdaptiveController(double enterRecoveryBelow = 0.48,
-                       double exitRecoveryAbove = 0.68);
+    AdaptiveController(double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
+                       double exitRecoveryAbove = kDefaultExitRecoveryAbove);
     TrackingMode choose(double confidence, TrackingMode currentMode) const;
 
 private:
@@ -98,6 +101,8 @@ private:
     int minInliers_;
     int keyframeInterval_;
     cv::Mat previousRawImage_;
+    cv::Mat previousPreparedImage_;
+    TrackingMode previousPreparedMode_{TrackingMode::LowCost};
     std::vector<cv::Point2f> previousPoints_;
     std::vector<int> previousLandmarkIds_;
     cv::Matx33d rotationWorldCamera_{cv::Matx33d::eye()};
@@ -146,6 +151,12 @@ struct RunSummary {
     std::int64_t rssDeltaBytes{};
     std::int64_t rssAfterBytes{};
     std::int64_t peakRssBytes{};
+    double energyJoules{std::numeric_limits<double>::quiet_NaN()};
+    std::string energyMethod{"not_measured"};
+    std::string energyScope{"not_available"};
+    std::string energyStatus{"unavailable"};
+    double controllerEnterThreshold{kDefaultEnterRecoveryBelow};
+    double controllerExitThreshold{kDefaultExitRecoveryAbove};
     double recoveryFraction{};
     std::size_t modeTransitions{};
 };
@@ -154,11 +165,15 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
                             const std::filesystem::path& outputPath,
                             const std::string& configuration,
                             const std::string& degradation,
-                            std::uint32_t seed = 17);
+                            std::uint32_t seed = 17,
+                            double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
+                            double exitRecoveryAbove = kDefaultExitRecoveryAbove);
 std::vector<RunSummary> runBenchmark(
     const std::filesystem::path& sequencePath,
     const std::filesystem::path& outputPath,
-    const std::vector<std::string>& degradations);
+    const std::vector<std::string>& degradations,
+    double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
+    double exitRecoveryAbove = kDefaultExitRecoveryAbove);
 void writeSummaries(const std::filesystem::path& outputPath,
                     const std::vector<RunSummary>& summaries);
 

@@ -16,7 +16,7 @@ add_library(adaptive_slam
 target_include_directories(adaptive_slam PUBLIC include)
 target_link_libraries(adaptive_slam PUBLIC adaptive_slam_controller ${OpenCV_LIBS})
 if(WIN32)
-    target_link_libraries(adaptive_slam PUBLIC Psapi)
+    target_link_libraries(adaptive_slam PUBLIC Psapi Pdh)
 endif()
 target_compile_options(adaptive_slam PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>

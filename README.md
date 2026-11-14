@@ -4,9 +4,9 @@ The native C/C++ implementation is built with CMake and OpenCV. It provides an a
 
 - **C controller API:** confidence-based low-cost/recovery selection with hysteresis.
 - **C++ front end:** Shi-Tomasi features, pyramidal Lucas-Kanade tracking, essential-matrix RANSAC bootstrap/fallback, two-view triangulation, and map-based PnP RANSAC.
-- **C++ evaluator:** EuRoC input, fixed-low/fixed-high/adaptive runs, synthetic degradations, similarity-aligned ATE, and CSV trajectory/frame/map/summary outputs.
+- **C++ evaluator:** EuRoC-format input, fixed-low/fixed-high/adaptive runs, synthetic degradations, similarity-aligned ATE, translation RPE, and CSV outputs.
 
-The native C/C++ project is the only maintained runtime; it does not require Python.
+The benchmark runtime is C/C++ and OpenCV. Optional batch and CSV-analysis scripts use only Python's standard library.
 
 ## Build
 
@@ -44,7 +44,11 @@ Run all four synthetic visual conditions:
 
 Each run writes frame and trajectory CSVs, a map CSV with landmarks/keyframes, and `summary.csv`. A tracking failure is a non-initial frame where neither map-based PnP nor essential-matrix motion estimation produced a pose with at least the configured minimum inliers; the failure rate is over non-initial frames. ATE is position RMSE after one global Umeyama similarity alignment. Translation RPE is the RMSE of adjacent-frame translation increments after applying that same global alignment; it is not a full six-degree-of-freedom pose RPE. Ground truth is interpolated at image timestamps, and frames outside its timestamp range are excluded.
 
-Memory columns distinguish RSS before/after the run from `peak_rss_bytes`, the maximum process RSS sampled at frame boundaries during that run. Brief within-frame peaks may be missed; this is not a per-module allocation measurement. Energy is marked `not_measured`; latency and the UAV simulator's estimated energy are not substitutes for measured power.
+On Windows, each configuration samples the PDH `Energy Meter(RAPL_Package0_PKG)\Energy` counter before and after the frame loop and converts the pWh delta to joules. `energy_scope=cpu_package_shared` means CPU-package energy, including idle consumption and other processes—not process-only or wall-socket energy. The summary records the counter method and status. If the counter cannot be read, energy stays `not_measured` with an explicit status; platforms without this counter do not get model-based numbers inserted. The UAV simulator's estimated energy is not used in the benchmark energy column.
+
+Memory columns distinguish RSS before/after the run from `peak_rss_bytes`, the maximum process RSS sampled at frame boundaries during that run. Brief within-frame peaks may be missed; this is not a per-module allocation measurement.
+
+The monocular controller defaults to entering recovery below `0.48` and returning to low-cost above `0.60`. The exit threshold is a provisional adjustment from the observed synthetic confidence trace (which peaked at `0.621` under the old `0.68` exit threshold), not a calibrated research result. Override thresholds with `--enter-recovery-below` and `--exit-recovery-above`; frame CSVs retain confidence and mode so switches can be inspected.
 
 To compare the adaptive run with both fixed baselines from one or more summaries:
 
@@ -52,26 +56,24 @@ To compare the adaptive run with both fixed baselines from one or more summaries
 python scripts\analyze_benchmark.py --input results\MH_01_easy\summary.csv results\MH_02_easy\summary.csv --output results\comparison.csv
 ```
 
-The comparison CSV reports per-sequence/degradation deltas and marks whether adaptive dominates, is dominated, or presents a trade-off across available ATE, RPE, failure-rate, latency, and peak-RSS metrics. Missing ground truth metrics are omitted rather than treated as zero. Each input must contain unique runs for its sequence/degradation/configuration combination.
+The comparison CSV reports per-sequence/degradation deltas and marks whether adaptive dominates, is dominated, or presents a trade-off across available ATE, RPE, failure-rate, latency, peak-RSS, and comparable measured-energy metrics. Energy is compared only when both rows have measured values with the same method and scope; shared package energy is still affected by unrelated system activity. Missing metrics are omitted rather than treated as zero. Each input must contain unique runs for its sequence/degradation/configuration combination.
 
 To run a real EuRoC evaluation, provide the dataset locally and run the benchmark on each sequence under identical machine, thread-count, and degradation settings. The repository currently contains only a synthetic EuRoC-format sequence, not the real EuRoC dataset; its results are pipeline checks, not evidence on EuRoC.
 
-The batch runner discovers a sequence passed directly or sequences one directory below the dataset root, runs every selected degradation for all three configurations, and writes per-sequence outputs plus a combined summary and campaign manifest:
+The batch runner discovers a sequence passed directly or sequences one directory below the dataset root, runs every selected degradation for all three configurations, and writes per-sequence outputs plus a combined summary and campaign manifest. `--repeats 5` runs five complete campaigns, stores each in a separate repeat directory, and tags each row in the combined summary with its repeat number. The comparison tool pairs runs with the same repeat number and keeps repetitions separate rather than averaging them:
 
 ```powershell
-python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root C:\datasets\EuRoC --output results\euroc_campaign --degradations none,blur,low_light,noise --threads 1
+python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root C:\datasets\EuRoC --output results\euroc_campaign --degradations none,blur,low_light,noise --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60
 python scripts\analyze_benchmark.py --input results\euroc_campaign\summary.csv --output results\euroc_campaign\comparisons.csv
 ```
 
-## Optimization choices and scope
+## Core tracker scope
 
-The attached accelerator material motivates data reuse, locality, and controlled parallelism. The native implementation uses OpenCV's optimized SIMD kernels, a reusable CLAHE instance for recovery frames, pre-reserved feature/map/keyframe storage, in-place vector updates where practical, and one-thread-by-default execution. Most importantly, the controller avoids the recovery configuration on frames where tracking confidence is already sufficient.
-
-**Winograd is not used intentionally.** Winograd transforms reduce multiply counts for dense small-kernel CNN convolutions. This SLAM front end is dominated by sparse feature tracking, geometric estimation, and image operations already provided by OpenCV; it has no dense convolution layer where adding Winograd would improve the workload. The supplied HLS matcher in `ORB_SLAM2_Matching\` remains a separate optional experiment and is not part of this CPU executable.
+The native implementation uses OpenCV's optimized kernels, reuses the CLAHE operator, caches the previous prepared image when the processing mode is unchanged, and defaults to one OpenCV thread for repeatable comparisons. A mode change requires preparing the prior frame in the new mode.
 
 This is a research baseline, not an ORB-SLAM3 equivalent. Monocular translation scale is arbitrary. There is no loop closure, relocalization after tracking loss, bundle adjustment, place recognition, or stereo/inertial fusion. The map is incrementally triangulated and is not globally optimized, so drift and bad map points can accumulate.
 
-ATE and RPE use timestamp-interpolated ground truth and per-run similarity alignment; these are not metric-scale errors and can hide monocular scale drift. Blur, low-light, and seeded additive-noise conditions are synthetic approximations, not calibrated camera or environment models. The available synthetic sequence has limited scene/motion diversity. No measured-energy result is produced: use a calibrated external meter or a verified platform energy counter, document the measurement boundaries and idle-power treatment, and repeat runs before making energy claims.
+ATE and RPE use timestamp-interpolated ground truth and per-run similarity alignment; these are not metric-scale errors and can hide monocular scale drift. Blur, low-light, and seeded additive-noise conditions are synthetic approximations, not calibrated camera or environment models. The available synthetic sequence has limited scene/motion diversity. Repeat timing and package-energy trials, keep the same machine conditions, and report the shared CPU-package scope when presenting results.
 
 There is no ORB-SLAM3 integration in this repository. A defensible comparison requires a separately obtained ORB-SLAM3 checkout and its dependencies, compatible camera settings, and a documented evaluation protocol. This prototype does not implement ORB-SLAM3's loop closure, relocalization, bundle adjustment, or visual-inertial pipeline, so it must not be described as equivalent.
 
@@ -79,33 +81,29 @@ There is no ORB-SLAM3 integration in this repository. A defensible comparison re
 
 `cpp\include\adaptive_slam\controller.h` exposes the hysteresis controller to C programs. It returns status codes for invalid inputs and has no OpenCV dependency. The C++ visual-SLAM API is declared in `cpp\include\adaptive_slam\slam.hpp`.
 
-## 3D UAV Hybrid LiDAR-Visual-Inertial SLAM (Low-MAC Extension)
+## Appendix: Simulated UAV, LiDAR/IMU, and hardware-oriented prototypes
 
-To support power-constrained 3D UAV platforms and provide resilience to sudden illumination collapse (e.g. 0-lux pitch darkness, tunnel entry, or solar glare), the framework includes a multi-modal hybrid extension (`adaptive_slam/uav_hybrid_slam.hpp`):
+The material below is a software simulation/architecture exploration, not a validated LiDAR-inertial SLAM system or hardware implementation. The benchmark synthesizes LiDAR scans and IMU inputs; it does not ingest physical sensors. The software HBST and integer-CLAHE code is not FPGA-accelerated, and operation counts do not establish measured energy savings.
 
-- **Hardware-Accelerated HBST Matcher (`adaptive_slam/hbst_matcher.hpp`):** Integrates the Eytzinger binary search tree matching from `ORB_SLAM2_Matching/` using 256-bit binary descriptors and bitwise XOR + Popcount (**0 floating-point MACs**).
-- **Integer-Only CLAHE (`adaptive_slam/low_mac_features.hpp`):** Fixed-point histogram clipping and redistribution with zero floating-point operations.
-- **Multi-Sensor 3-Tier Controller:**
-  - `LowCost`: Nominal feature budget (450 features), 2 pyramid levels, 5x downsampled LiDAR.
-  - `Recovery`: Activated when visual confidence drops ($0.20 \le C_v < 0.48$). Runs integer CLAHE, 1200 features, 4 pyramid levels.
-  - `VisualBypassLIO`: Triggered when light collapses completely ($C_v < 0.20$, e.g. 0-lux blackout or blinding solar flare). Bypasses image processing entirely (**0 visual MACs**), preserving 3D metric navigation purely via LiDAR and IMU until lighting is restored.
-- **Direct Metric Scale:** Leverages 3D LiDAR point clouds and high-rate IMU pre-integration ($400\text{ Hz}$) on $SO(3) \times \mathbb{R}^3$, eliminating monocular scale ambiguity.
+### UAV hybrid simulation
 
-### Run UAV Hybrid SLAM Benchmark
+`adaptive_slam/uav_hybrid_slam.hpp` contains an experimental three-mode software path. It can skip visual processing for blackout frames in the simulation. The generated point cloud is not a Livox sensor capture; the IMU stream is generated in `main.cpp` at camera-frame cadence, not at a validated 400 Hz. `processImu` now propagates orientation and integrates accelerometer specific force with configured gravity using a simple discrete kinematic update. It does not perform bias estimation, covariance propagation, or factor-graph IMU pre-integration.
+
+The UAV demo's `estimatedEnergyJoules` is a rough MAC/time model only. It is not a measurement and is not written into the benchmark's `energy_joules` field. Benchmark RAPL readings are separate shared CPU-package deltas for each visual configuration.
+
+#### Run the simulation
 
 ```powershell
-.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence C:\datasets\MH_01_easy --output results --uav-hybrid
+.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence synthetic\ecolivo-wsl --output results\ecolivo_sim --uav-hybrid
 ```
 
-### Test Sudden Illumination Shock Resilience
-
-Simulate sudden optical blackout or blinding solar flare:
+#### Inject a synthetic illumination shock
 
 ```powershell
-.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence C:\datasets\MH_01_easy --output results --uav-hybrid --test-shock blackout
+.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence synthetic\ecolivo-wsl --output results\blackout_sim --uav-hybrid --test-shock blackout
 ```
 
-## WSL / Linux simulated terminal workflow
+### WSL / Linux simulated terminal workflow
 
 EcoLIVO includes a complete laptop-only ROS-style simulation. It does not require a ROS installation,
 ROS master, real LiDAR, real IMU, or real camera. The simulation provides the same four steps used in
@@ -121,7 +119,7 @@ The synthetic bag contains camera frame timestamps plus marker topics for `/came
 read real sensor messages; this is a deterministic software benchmark, not a hardware sensor
 integration.
 
-### Install
+#### Install
 
 Ubuntu 20.04 ships CMake 3.16, while this project requires CMake 3.18 or newer:
 
@@ -151,7 +149,7 @@ Install FlameGraph tools for SVG generation:
 git clone https://github.com/brendangregg/FlameGraph.git "$HOME/FlameGraph"
 ```
 
-### T1: start the mapping node, FAST-LIVO launch equivalent
+#### T1: start the synthetic mapping process
 
 Before starting, keep the shell wrappers normalized to LF and run them directly from the repository
 root. Do not paste Windows `\r` text or add a literal backslash as a command argument. The wrappers
@@ -195,7 +193,7 @@ fast_livo mapping_avia.launch
 The mapping process writes PID 1371 style information to `.eco_mapping.pid` and output to
 `.eco_mapping.log`.
 
-### T2: play the synthetic rosbag
+#### T2: play the synthetic rosbag
 
 For the FAST-LIVO-style command shown below, WSL automatically maps
 `./bags/Retail_Street.bag` to the generated EcoLIVO synthetic bag and enables the RViz-style GUI:
@@ -235,7 +233,7 @@ Inspect bag metadata before playback:
   ./synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag
 ```
 
-### T3: inspect processes and profile the mapping process
+#### T3: inspect processes and profile the simulated process
 
 ```bash
 ps aux | grep adaptive_slam_benchmark
@@ -268,7 +266,7 @@ results/perf/ecolivo_perf.data
 results/perf/ecolivo_profile.svg
 ```
 
-### Stop and rerun
+#### Stop and rerun
 
 ```bash
 ./scripts/run_wsl_simulation.sh stop

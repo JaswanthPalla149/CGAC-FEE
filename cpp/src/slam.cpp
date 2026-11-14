@@ -138,6 +138,10 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
 
     if (previousRawImage_.empty()) {
         previousRawImage_ = rawGray.clone();
+        previousPreparedImage_ = mode == TrackingMode::LowCost
+                                     ? previousRawImage_
+                                     : currentImage.clone();
+        previousPreparedMode_ = mode;
         previousPoints_ = detect(currentImage, mode);
         previousLandmarkIds_.assign(previousPoints_.size(), -1);
         keyframes_.push_back({timestampNs, rotationWorldCamera_, positionWorld_});
@@ -152,7 +156,10 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
         return result;
     }
 
-    const cv::Mat previousImage = prepare(previousRawImage_, mode);
+    const cv::Mat previousImage =
+        previousPreparedMode_ == mode && !previousPreparedImage_.empty()
+            ? previousPreparedImage_
+            : prepare(previousRawImage_, mode);
     if (previousPoints_.size() < 5) {
         previousPoints_ = detect(previousImage, mode);
         previousLandmarkIds_.assign(previousPoints_.size(), -1);
@@ -241,6 +248,10 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     }
 
     previousRawImage_ = rawGray.clone();
+    previousPreparedImage_ = mode == TrackingMode::LowCost
+                                 ? previousRawImage_
+                                 : currentImage.clone();
+    previousPreparedMode_ = mode;
     previousPoints_.swap(nextPoints);
     previousLandmarkIds_.swap(nextIds);
     ++frameIndex_;

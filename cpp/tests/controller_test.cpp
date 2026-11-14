@@ -11,6 +11,10 @@ int main() {
             TrackingMode::Recovery ||
         controller.choose(0.55, TrackingMode::Recovery) !=
             TrackingMode::Recovery ||
+        controller.choose(0.59, TrackingMode::Recovery) !=
+            TrackingMode::Recovery ||
+        controller.choose(0.61, TrackingMode::Recovery) !=
+            TrackingMode::LowCost ||
         controller.choose(0.7, TrackingMode::Recovery) !=
             TrackingMode::LowCost ||
         controller.choose(0.55, TrackingMode::LowCost) !=

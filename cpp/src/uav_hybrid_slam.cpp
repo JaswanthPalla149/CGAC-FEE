@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <algorithm>
+#include <stdexcept>
 
 namespace adaptive_slam {
 
@@ -85,20 +86,32 @@ void UAVHybridSLAM::reset(const cv::Vec3d& initialPosition) {
     globalLidarMap_.clear();
     currentScanWorld_.clear();
     lastImuTimestampNs_ = 0;
+    hasImuTimestamp_ = false;
     totalMacs_ = 0;
     totalJoules_ = 0.0;
 }
 
 void UAVHybridSLAM::processImu(const ImuMeasurement& imu) {
-    if (lastImuTimestampNs_ == 0) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!std::isfinite(imu.angularVel[axis]) ||
+            !std::isfinite(imu.linearAccel[axis])) {
+            throw std::invalid_argument("IMU measurements must be finite");
+        }
+    }
+    if (!hasImuTimestamp_) {
         lastImuTimestampNs_ = imu.timestampNs;
+        state_.timestampNs = imu.timestampNs;
+        hasImuTimestamp_ = true;
         return;
     }
 
-    const double dt = std::max(1e-5, static_cast<double>(imu.timestampNs - lastImuTimestampNs_) * 1e-9);
+    if (imu.timestampNs <= lastImuTimestampNs_) {
+        throw std::invalid_argument("IMU timestamps must be strictly increasing");
+    }
+    const double dt =
+        static_cast<double>(imu.timestampNs - lastImuTimestampNs_) * 1e-9;
     lastImuTimestampNs_ = imu.timestampNs;
 
-    // Unbiased angular velocity: gyro integration for orientation prior
     const cv::Vec3d unbOmega = imu.angularVel - state_.gyroBias;
     const double angle = cv::norm(unbOmega) * dt;
     if (angle > 1e-8) {
@@ -114,8 +127,14 @@ void UAVHybridSLAM::processImu(const ImuMeasurement& imu) {
         state_.rotationWorldBody = state_.rotationWorldBody * dR;
     }
 
+    const cv::Vec3d accelerationWorld =
+        state_.rotationWorldBody * (imu.linearAccel - state_.accelBias) +
+        config_.gravity;
+    state_.positionWorld += state_.velocityWorld * dt +
+                            accelerationWorld * (0.5 * dt * dt);
+    state_.velocityWorld += accelerationWorld * dt;
     state_.timestampNs = imu.timestampNs;
-    totalMacs_ += 45; // ~45 MACs for high-rate IMU orientation integration
+    totalMacs_ += 75;
 }
 
 cv::Mat UAVHybridSLAM::prepareImage(const cv::Mat& image, HybridPowerMode mode) const {

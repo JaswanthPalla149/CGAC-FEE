@@ -14,6 +14,7 @@ METRICS = (
     "mean_latency_ms",
     "p95_latency_ms",
     "peak_rss_bytes",
+    "energy_joules",
 )
 BASELINES = ("fixed_low", "fixed_high")
 
@@ -31,7 +32,12 @@ def load_runs(paths):
     for path in paths:
         with path.open(newline="", encoding="utf-8-sig") as source:
             for row in csv.DictReader(source):
-                key = (row["sequence"], row["degradation"], row["configuration"])
+                key = (
+                    row["sequence"],
+                    row["degradation"],
+                    row.get("repeat", "1"),
+                    row["configuration"],
+                )
                 if key in runs:
                     raise ValueError(f"duplicate run in input summaries: {key}")
                 runs[key] = row
@@ -40,24 +46,47 @@ def load_runs(paths):
 
 def compare_runs(runs):
     comparisons = []
-    scenarios = sorted({key[:2] for key in runs if key[2] == "adaptive"})
-    for sequence, degradation in scenarios:
-        adaptive = runs[(sequence, degradation, "adaptive")]
+    scenarios = sorted({key[:3] for key in runs if key[3] == "adaptive"})
+    for sequence, degradation, repeat in scenarios:
+        adaptive = runs[(sequence, degradation, repeat, "adaptive")]
         for baseline_name in BASELINES:
-            baseline = runs.get((sequence, degradation, baseline_name))
+            baseline = runs.get((sequence, degradation, repeat, baseline_name))
             if baseline is None:
                 continue
             row = {
                 "sequence": sequence,
                 "degradation": degradation,
+                "repeat": repeat,
                 "baseline": baseline_name,
             }
             better = False
             worse = False
             available = []
             for metric in METRICS:
-                adaptive_value = number(adaptive, metric)
-                baseline_value = number(baseline, metric)
+                if metric == "energy_joules":
+                    comparable_energy = (
+                        adaptive.get("energy_status") == "measured"
+                        and baseline.get("energy_status") == "measured"
+                        and adaptive.get("energy_method") == baseline.get("energy_method")
+                        and adaptive.get("energy_scope") == baseline.get("energy_scope")
+                    )
+                    adaptive_value = (
+                        number(adaptive, metric) if comparable_energy else None
+                    )
+                    baseline_value = (
+                        number(baseline, metric) if comparable_energy else None
+                    )
+                    row["energy_method"] = (
+                        adaptive.get("energy_method", "not_comparable")
+                        if comparable_energy else "not_comparable"
+                    )
+                    row["energy_scope"] = (
+                        adaptive.get("energy_scope", "not_comparable")
+                        if comparable_energy else "not_comparable"
+                    )
+                else:
+                    adaptive_value = number(adaptive, metric)
+                    baseline_value = number(baseline, metric)
                 row[f"adaptive_{metric}"] = adaptive_value
                 row[f"baseline_{metric}"] = baseline_value
                 delta = None
@@ -101,7 +130,11 @@ def main():
     comparisons = compare_runs(load_runs(args.input))
     if not comparisons:
         raise SystemExit("no adaptive runs with matching fixed baselines were found")
-    fields = ["sequence", "degradation", "baseline", "metrics_compared", "result"]
+    fields = [
+        "sequence", "degradation", "repeat", "baseline",
+        "metrics_compared", "result",
+        "energy_method", "energy_scope",
+    ]
     for metric in METRICS:
         fields.extend((
             f"adaptive_{metric}",

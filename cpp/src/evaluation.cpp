@@ -21,6 +21,8 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <pdh.h>
+#include <pdhmsg.h>
 #include <psapi.h>
 #elif defined(__linux__)
 #include <unistd.h>
@@ -71,6 +73,127 @@ std::int64_t processRssBytes() {
 #endif
     return -1;
 }
+
+struct EnergyMeasurement {
+    double joules{std::numeric_limits<double>::quiet_NaN()};
+    std::string method{"not_measured"};
+    std::string scope{"not_available"};
+    std::string status{"unsupported_platform"};
+};
+
+class PackageEnergyMeter {
+public:
+    PackageEnergyMeter() {
+#ifdef _WIN32
+        PDH_STATUS status = PdhOpenQueryW(nullptr, 0, &query_);
+        if (status != ERROR_SUCCESS) {
+            status_ = statusText("open_query", status);
+            return;
+        }
+        status = PdhAddEnglishCounterW(
+            query_, L"\\Energy Meter(RAPL_Package0_PKG)\\Energy", 0,
+            &counter_);
+        if (status != ERROR_SUCCESS) {
+            status_ = statusText("add_rapl_energy_counter", status);
+            return;
+        }
+        status_ = "ready";
+#endif
+    }
+
+    ~PackageEnergyMeter() {
+#ifdef _WIN32
+        if (query_ != nullptr) {
+            PdhCloseQuery(query_);
+        }
+#endif
+    }
+
+    PackageEnergyMeter(const PackageEnergyMeter&) = delete;
+    PackageEnergyMeter& operator=(const PackageEnergyMeter&) = delete;
+
+    void begin() {
+#ifdef _WIN32
+        if (counter_ == nullptr) {
+            return;
+        }
+        if (!readPicoWattHours(startPicoWattHours_)) {
+            return;
+        }
+        started_ = true;
+        status_ = "started";
+#endif
+    }
+
+    EnergyMeasurement finish() {
+#ifdef _WIN32
+        if (!started_) {
+            return {std::numeric_limits<double>::quiet_NaN(), "not_measured",
+                    "not_available", status_};
+        }
+        double endPicoWattHours = 0.0;
+        if (!readPicoWattHours(endPicoWattHours)) {
+            return {std::numeric_limits<double>::quiet_NaN(), "not_measured",
+                    "not_available", status_};
+        }
+        const double deltaPicoWattHours =
+            endPicoWattHours - startPicoWattHours_;
+        if (deltaPicoWattHours < 0.0) {
+            return {std::numeric_limits<double>::quiet_NaN(), "not_measured",
+                    "not_available", "counter_decreased"};
+        }
+        return {deltaPicoWattHours * 3.6e-9,
+                "windows_pdh_rapl_package_energy", "cpu_package_shared",
+                "measured"};
+#else
+        return {};
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    static std::string statusText(const char* operation, PDH_STATUS status) {
+        std::ostringstream message;
+        message << operation << "_pdh_status_0x" << std::hex
+                << static_cast<unsigned long>(status);
+        return message.str();
+    }
+
+    bool readPicoWattHours(double& value) {
+        PDH_STATUS status = PdhCollectQueryData(query_);
+        if (status != ERROR_SUCCESS) {
+            status_ = statusText("collect_energy_counter", status);
+            return false;
+        }
+        PDH_FMT_COUNTERVALUE formatted{};
+        DWORD counterType = 0;
+        status = PdhGetFormattedCounterValue(
+            counter_, PDH_FMT_DOUBLE, &counterType, &formatted);
+        if (status != ERROR_SUCCESS) {
+            status_ = statusText("format_energy_counter", status);
+            return false;
+        }
+        if (formatted.CStatus != PDH_CSTATUS_VALID_DATA &&
+            formatted.CStatus != PDH_CSTATUS_NEW_DATA) {
+            status_ = statusText("invalid_energy_counter_data",
+                                 formatted.CStatus);
+            return false;
+        }
+        if (!std::isfinite(formatted.doubleValue)) {
+            status_ = "non_finite_energy_counter_value";
+            return false;
+        }
+        value = formatted.doubleValue;
+        return true;
+    }
+
+    PDH_HQUERY query_{};
+    PDH_HCOUNTER counter_{};
+    double startPicoWattHours_{};
+    bool started_{};
+    std::string status_{"counter_unavailable"};
+#endif
+};
 
 std::optional<cv::Vec3d> interpolateGroundTruth(
     std::int64_t timestamp,
@@ -375,7 +498,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
                             const std::filesystem::path& outputPath,
                             const std::string& configuration,
                             const std::string& degradation,
-                            std::uint32_t seed) {
+                            std::uint32_t seed,
+                            double enterRecoveryBelow,
+                            double exitRecoveryAbove) {
     if (std::find(kModes.begin(), kModes.end(), configuration) == kModes.end()) {
         throw std::invalid_argument("unsupported configuration: " + configuration);
     }
@@ -386,7 +511,7 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
 
     const EuRoCSequence sequence = loadEuRoC(sequencePath);
     FeatureSLAM slam(sequence.camera);
-    AdaptiveController controller;
+    AdaptiveController controller(enterRecoveryBelow, exitRecoveryAbove);
     TrackingMode mode = configuration == "fixed_high"
                             ? TrackingMode::Recovery
                             : TrackingMode::LowCost;
@@ -395,6 +520,8 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     std::size_t transitions = 0;
     const std::int64_t rssBefore = processRssBytes();
     std::int64_t peakRss = rssBefore;
+    PackageEnergyMeter energyMeter;
+    energyMeter.begin();
     const std::clock_t cpuStart = std::clock();
     const auto wallStart = std::chrono::steady_clock::now();
 
@@ -419,6 +546,7 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         }
     }
 
+    const EnergyMeasurement energy = energyMeter.finish();
     const double wallSeconds =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart)
             .count();
@@ -442,6 +570,12 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     summary.rssDeltaBytes =
         rssBefore >= 0 && rssAfter >= 0 ? rssAfter - rssBefore : -1;
     summary.peakRssBytes = peakRss;
+    summary.energyJoules = energy.joules;
+    summary.energyMethod = energy.method;
+    summary.energyScope = energy.scope;
+    summary.energyStatus = energy.status;
+    summary.controllerEnterThreshold = enterRecoveryBelow;
+    summary.controllerExitThreshold = exitRecoveryAbove;
     summary.modeTransitions = transitions;
 
     std::vector<double> latencies;
@@ -508,7 +642,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
 std::vector<RunSummary> runBenchmark(
     const std::filesystem::path& sequencePath,
     const std::filesystem::path& outputPath,
-    const std::vector<std::string>& degradations) {
+    const std::vector<std::string>& degradations,
+    double enterRecoveryBelow,
+    double exitRecoveryAbove) {
     for (const auto& degradation : degradations) {
         if (std::find(kDegradations.begin(), kDegradations.end(), degradation) ==
             kDegradations.end()) {
@@ -520,7 +656,9 @@ std::vector<RunSummary> runBenchmark(
     for (const auto& degradation : degradations) {
         for (const auto& configuration : kModes) {
             summaries.push_back(runConfiguration(sequencePath, outputPath,
-                                                  configuration, degradation));
+                                                  configuration, degradation, 17,
+                                                  enterRecoveryBelow,
+                                                  exitRecoveryAbove));
         }
     }
     writeSummaries(outputPath, summaries);
@@ -539,8 +677,10 @@ void writeSummaries(const std::filesystem::path& outputPath,
               "rpe_translation_rmse_similarity_aligned,"
               "tracking_failure_frames,tracking_failure_rate,mean_latency_ms,"
               "p95_latency_ms,wall_time_s,cpu_time_s,rss_delta_bytes,"
-              "rss_after_bytes,peak_rss_bytes,energy_joules,recovery_mode_fraction,"
-              "mode_transitions,monocular_scale\n"
+              "rss_after_bytes,peak_rss_bytes,energy_joules,energy_method,"
+              "energy_scope,energy_status,recovery_mode_fraction,"
+              "mode_transitions,controller_enter_threshold,"
+              "controller_exit_threshold,monocular_scale\n"
            << std::setprecision(10);
     for (const RunSummary& summary : summaries) {
         output << summary.sequence << ',' << summary.configuration << ','
@@ -552,9 +692,18 @@ void writeSummaries(const std::filesystem::path& outputPath,
                << summary.meanLatencyMs << ',' << summary.p95LatencyMs << ','
                << summary.wallTimeSeconds << ',' << summary.cpuTimeSeconds << ','
                << summary.rssDeltaBytes << ',' << summary.rssAfterBytes << ','
-               << summary.peakRssBytes
-               << ",not_measured," << summary.recoveryFraction << ','
+               << summary.peakRssBytes << ',';
+        if (std::isfinite(summary.energyJoules)) {
+            output << summary.energyJoules;
+        } else {
+            output << "not_measured";
+        }
+        output << ',' << summary.energyMethod << ',' << summary.energyScope
+               << ',' << summary.energyStatus << ','
+               << summary.recoveryFraction << ','
                << summary.modeTransitions
+        << ',' << summary.controllerEnterThreshold << ','
+        << summary.controllerExitThreshold
                << ",unknown_similarity_aligned\n";
     }
 }

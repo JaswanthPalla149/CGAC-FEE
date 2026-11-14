@@ -181,7 +181,8 @@ void renderFastLivo2Simulation(
 
     ty += 22;
     std::stringstream macStream;
-    macStream << "MACs: " << state.estimatedMacCount << " | Energy: "
+    macStream << "MACs: " << state.estimatedMacCount
+              << " | Model energy (not measured): "
               << std::fixed << std::setprecision(4) << state.estimatedEnergyJoules << " J";
     cv::putText(canvas, macStream.str(), cv::Point(24, ty), cv::FONT_HERSHEY_SIMPLEX, 0.42, cv::Scalar(255, 210, 100), 1);
 
@@ -349,8 +350,11 @@ std::vector<std::string> splitList(const std::string& text) {
 void printUsage(const char* executable) {
     std::cout
         << "Usage: " << executable
-        << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N] [--uav-hybrid] [--test-shock SHOCK] [--fps N] [--gui]\n"
+        << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N]"
+           " [--enter-recovery-below VALUE] [--exit-recovery-above VALUE]"
+           " [--uav-hybrid] [--test-shock SHOCK] [--fps N] [--gui]\n"
         << "  LIST: comma-separated none,blur,low_light,noise\n"
+        << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
         << " --sequence synthetic/ecolivo-wsl --output results/ecolivo --uav-hybrid --fps 10\n";
@@ -364,6 +368,8 @@ int main(int argc, char** argv) {
         std::filesystem::path outputPath{"results"};
         std::vector<std::string> degradations{"none"};
         int threads = 1;
+        double enterRecoveryBelow = adaptive_slam::kDefaultEnterRecoveryBelow;
+        double exitRecoveryAbove = adaptive_slam::kDefaultExitRecoveryAbove;
         bool runUavHybrid = false;
         bool enableGui = false;
         std::string testShock;
@@ -408,6 +414,10 @@ int main(int argc, char** argv) {
                 degradations = splitList(value);
             } else if (argument == "--threads") {
                 threads = std::stoi(value);
+            } else if (argument == "--enter-recovery-below") {
+                enterRecoveryBelow = std::stod(value);
+            } else if (argument == "--exit-recovery-above") {
+                exitRecoveryAbove = std::stod(value);
             } else if (argument == "--test-shock") {
                 testShock = value;
                 runUavHybrid = true;
@@ -434,7 +444,7 @@ int main(int argc, char** argv) {
 
         if (runUavHybrid) {
             std::cout << "\n=======================================================\n"
-                      << "Running 3D UAV Hybrid LiDAR-Visual-Inertial SLAM (EcoLIVO)\n"
+                      << "Running SIMULATED UAV/LiDAR/IMU extension (EcoLIVO)\n"
                       << "=======================================================\n";
             const auto sequence = adaptive_slam::loadEuRoC(sequencePath);
             adaptive_slam::HybridSlamConfig config;
@@ -487,10 +497,10 @@ int main(int argc, char** argv) {
                 // Simulate realistic Livox Avia multi-modal point cloud (250 range points)
                 adaptive_slam::LidarScan scan = simulateAviaScan(frame.timestampNs, uavPos, uavRot, 250);
 
-                // High-rate IMU pre-integration step
+                // Feed the simulated IMU sample at this camera timestamp.
                 adaptive_slam::ImuMeasurement imu;
                 imu.timestampNs = frame.timestampNs;
-                imu.linearAccel = {0.0, 0.0, 9.81}; // Gravity compensated
+                imu.linearAccel = {0.0, 0.0, 9.81}; // Upright stationary specific force
                 imu.angularVel = {0.0, 0.0, 0.0};
                 hybridSlam.processImu(imu);
 
@@ -560,12 +570,14 @@ int main(int argc, char** argv) {
                       << "  Integer CLAHE Recovery   : " << recoveryFrames << '\n'
                       << "  Visual Bypass (0 MACs)   : " << bypassFrames << '\n'
                       << "  Total MAC Operations     : " << hybridSlam.totalMacOperations() << '\n'
-                      << "  Total Estimated Energy   : " << std::fixed << std::setprecision(3)
+                      << "  Total Model Energy (not measured): " << std::fixed << std::setprecision(3)
                       << hybridSlam.totalEnergyJoules() << " Joules\n"
                       << "=======================================================\n\n";
         }
 
-        const auto summaries = adaptive_slam::runBenchmark(sequencePath, outputPath, degradations);
+        const auto summaries = adaptive_slam::runBenchmark(
+            sequencePath, outputPath, degradations, enterRecoveryBelow,
+            exitRecoveryAbove);
         for (const auto& summary : summaries) {
             std::cout << std::setw(10) << summary.configuration << " / "
                       << std::setw(9) << std::left << summary.degradation
@@ -579,6 +591,14 @@ int main(int argc, char** argv) {
             std::cout << " latency=" << std::fixed << std::setprecision(2)
                       << summary.meanLatencyMs << " ms"
                       << " failures=" << summary.trackingFailures
+                      << " package_energy=";
+            if (std::isfinite(summary.energyJoules)) {
+                std::cout << std::setprecision(6) << summary.energyJoules
+                          << " J (" << summary.energyScope << ')';
+            } else {
+                std::cout << "not_measured[" << summary.energyStatus << ']';
+            }
+            std::cout
                       << " landmarks=" << summary.landmarks << '\n';
         }
         std::cout << "Wrote benchmark artifacts to "

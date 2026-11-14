@@ -101,13 +101,27 @@ inline cv::Mat applyIntegerClahe(const cv::Mat& gray, int clipLimit = 3, int gri
             for (int i = 0; i < 256; ++i) {
                 hist[i] += bonus;
             }
+            const std::uint32_t remainder = excess & 0xFFU;
+            for (std::uint32_t i = 0; i < remainder; ++i) {
+                ++hist[i];
+            }
 
-            // Step 4: Build Cumulative Distribution Function (CDF) scaled to [0, 255]
+            // Step 4: Build a CDF normalized from the first populated bin.
             std::uint32_t cdf = 0;
+            std::uint32_t cdfMinimum = 0;
             auto& lut = tileCdfs[ty * gridTilesX + tx];
             for (int i = 0; i < 256; ++i) {
                 cdf += hist[i];
-                std::uint32_t val = (cdf * 255U) / actualTileSize;
+                if (cdfMinimum == 0 && hist[i] != 0) {
+                    cdfMinimum = cdf;
+                }
+                const std::uint32_t denominator =
+                    std::max(1U, static_cast<std::uint32_t>(actualTileSize) -
+                                     cdfMinimum);
+                const std::uint32_t val =
+                    cdf <= cdfMinimum
+                        ? 0U
+                        : ((cdf - cdfMinimum) * 255U) / denominator;
                 lut[i] = static_cast<std::uint8_t>(std::min(255U, val));
             }
         }

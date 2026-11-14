@@ -31,7 +31,7 @@ inline int popcount64(std::uint64_t v) noexcept {
 #endif
 }
 
-// 256-bit Binary Descriptor (Hardware-acceleratable via bitwise XOR + PopCount)
+// 256-bit binary descriptor using XOR and population count for Hamming distance.
 struct alignas(32) BinaryDescriptor {
     std::uint64_t words[4]{0, 0, 0, 0};
 
@@ -69,7 +69,7 @@ struct MatchResult {
     std::uint16_t distance{257}; // Max possible distance + 1
 };
 
-// Top-level hardware function implementation (compatible with HLS HBST architecture)
+// Hardware-oriented tree search kernel; this implementation runs on the CPU.
 inline void hbst_tree_search(
     const std::uint32_t tree_mem[kMaxTreeNodes],
     const std::uint32_t leaf_info_mem[kMaxTreeNodes][2],
@@ -153,12 +153,26 @@ public:
 
         if (feature_count_ == 0) return;
 
-        buildNode(0, indices, 0);
+        std::vector<BinaryDescriptor> orderedFeatures;
+        std::vector<std::uint32_t> orderedIndices;
+        orderedFeatures.reserve(feature_count_);
+        orderedIndices.reserve(feature_count_);
+        std::size_t nextFeature = 0;
+        buildNode(0, indices, orderedFeatures, orderedIndices, nextFeature, 0);
+        for (std::size_t i = 0; i < feature_count_; ++i) {
+            feature_mem_[i] = orderedFeatures[i];
+            original_indices_[i] = orderedIndices[i];
+        }
     }
 
     MatchResult query(const BinaryDescriptor& descriptor) const {
         MatchResult res;
         hbst_tree_search(tree_mem_, leaf_info_mem_, feature_mem_, descriptor, &res);
+        if (res.feature_idx >= 0 &&
+            static_cast<std::size_t>(res.feature_idx) < feature_count_) {
+            res.feature_idx =
+                static_cast<int>(original_indices_[res.feature_idx]);
+        }
         return res;
     }
 
@@ -168,19 +182,24 @@ public:
     std::size_t featureCount() const noexcept { return feature_count_; }
 
 private:
-    void buildNode(std::uint32_t nodeIdx, const std::vector<std::uint32_t>& indices, int depth) {
+    void buildNode(std::uint32_t nodeIdx,
+                   const std::vector<std::uint32_t>& indices,
+                   std::vector<BinaryDescriptor>& orderedFeatures,
+                   std::vector<std::uint32_t>& orderedIndices,
+                   std::size_t& nextFeature, int depth) {
         if (nodeIdx >= kMaxTreeNodes) return;
 
         // Leaf threshold: <= 16 features or max depth reached
         if (indices.size() <= 16 || depth >= 14) {
             tree_mem_[nodeIdx] = (1U << kLeafFlagBit);
-            if (!indices.empty()) {
-                leaf_info_mem_[nodeIdx][0] = indices.front();
-                leaf_info_mem_[nodeIdx][1] = static_cast<std::uint32_t>(indices.size());
-            } else {
-                leaf_info_mem_[nodeIdx][0] = 0;
-                leaf_info_mem_[nodeIdx][1] = 0;
+            leaf_info_mem_[nodeIdx][0] = static_cast<std::uint32_t>(nextFeature);
+            leaf_info_mem_[nodeIdx][1] =
+                static_cast<std::uint32_t>(indices.size());
+            for (std::uint32_t index : indices) {
+                orderedFeatures.push_back(feature_mem_[index]);
+                orderedIndices.push_back(index);
             }
+            nextFeature += indices.size();
             return;
         }
 
@@ -213,19 +232,27 @@ private:
 
         if (left.empty() || right.empty()) {
             tree_mem_[nodeIdx] = (1U << kLeafFlagBit);
-            leaf_info_mem_[nodeIdx][0] = indices.front();
+            leaf_info_mem_[nodeIdx][0] = static_cast<std::uint32_t>(nextFeature);
             leaf_info_mem_[nodeIdx][1] = static_cast<std::uint32_t>(indices.size());
+            for (std::uint32_t index : indices) {
+                orderedFeatures.push_back(feature_mem_[index]);
+                orderedIndices.push_back(index);
+            }
+            nextFeature += indices.size();
             return;
         }
 
         tree_mem_[nodeIdx] = static_cast<std::uint32_t>(bestBit) & kIndexMask;
-        buildNode((nodeIdx << 1) + 1, left, depth + 1);
-        buildNode((nodeIdx << 1) + 2, right, depth + 1);
+        buildNode((nodeIdx << 1) + 1, left, orderedFeatures, orderedIndices,
+                  nextFeature, depth + 1);
+        buildNode((nodeIdx << 1) + 2, right, orderedFeatures, orderedIndices,
+                  nextFeature, depth + 1);
     }
 
     std::uint32_t tree_mem_[kMaxTreeNodes];
     std::uint32_t leaf_info_mem_[kMaxTreeNodes][2];
     BinaryDescriptor feature_mem_[kMaxFeatures];
+    std::uint32_t original_indices_[kMaxFeatures]{};
     std::size_t feature_count_{0};
 };
 

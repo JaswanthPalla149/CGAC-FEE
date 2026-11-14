@@ -53,6 +53,10 @@ def main():
     parser.add_argument("--degradations", type=parse_degradations,
                         default=list(DEGRADATIONS))
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument("--repeats", type=int, default=1,
+                        help="number of complete benchmark repetitions")
+    parser.add_argument("--enter-recovery-below", type=float, default=0.48)
+    parser.add_argument("--exit-recovery-above", type=float, default=0.60)
     args = parser.parse_args()
 
     benchmark = args.benchmark.resolve()
@@ -62,6 +66,10 @@ def main():
         parser.error(f"benchmark executable does not exist: {benchmark}")
     if args.threads < 1:
         parser.error("--threads must be a positive integer")
+    if args.repeats < 1:
+        parser.error("--repeats must be a positive integer")
+    if not (0 <= args.enter_recovery_below < args.exit_recovery_above <= 1):
+        parser.error("controller thresholds must satisfy 0 <= enter < exit <= 1")
     if not dataset_root.is_dir():
         parser.error(f"dataset root does not exist: {dataset_root}")
     sequences = find_sequences(dataset_root)
@@ -75,19 +83,32 @@ def main():
     all_rows = []
     for sequence in sequences:
         sequence_output = output / sequence.name
-        command = [
-            str(benchmark),
-            "--sequence", str(sequence),
-            "--output", str(sequence_output),
-            "--degradations", ",".join(args.degradations),
-            "--threads", str(args.threads),
-        ]
-        print(f"Running {sequence.name}: {' '.join(command)}", flush=True)
-        subprocess.run(command, check=True)
-        with (sequence_output / "summary.csv").open(
-            newline="", encoding="utf-8-sig"
-        ) as source:
-            all_rows.extend(csv.DictReader(source))
+        for repeat in range(1, args.repeats + 1):
+            repeat_output = (
+                sequence_output if args.repeats == 1
+                else sequence_output / f"repeat_{repeat:02d}"
+            )
+            command = [
+                str(benchmark),
+                "--sequence", str(sequence),
+                "--output", str(repeat_output),
+                "--degradations", ",".join(args.degradations),
+                "--threads", str(args.threads),
+                "--enter-recovery-below", str(args.enter_recovery_below),
+                "--exit-recovery-above", str(args.exit_recovery_above),
+            ]
+            print(
+                f"Running {sequence.name} repeat {repeat}/{args.repeats}: "
+                f"{' '.join(command)}",
+                flush=True,
+            )
+            subprocess.run(command, check=True)
+            with (repeat_output / "summary.csv").open(
+                newline="", encoding="utf-8-sig"
+            ) as source:
+                for row in csv.DictReader(source):
+                    row["repeat"] = str(repeat)
+                    all_rows.append(row)
 
     summary_path = output / "summary.csv"
     if all_rows:
@@ -104,6 +125,9 @@ def main():
         "sequences": [str(path) for path in sequences],
         "degradations": args.degradations,
         "opencv_threads": args.threads,
+        "repeats": args.repeats,
+        "controller_enter_threshold": args.enter_recovery_below,
+        "controller_exit_threshold": args.exit_recovery_above,
         "degradation_seed": 17,
         "summary_csv": str(summary_path),
     }

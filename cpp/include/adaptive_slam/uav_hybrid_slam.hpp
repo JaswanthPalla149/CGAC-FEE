@@ -26,7 +26,7 @@ const char* hybridModeName(HybridPowerMode mode) noexcept;
 struct ImuMeasurement {
     std::int64_t timestampNs{0};
     cv::Vec3d angularVel{0.0, 0.0, 0.0};  // rad/s (gyroscope)
-    cv::Vec3d linearAccel{0.0, 0.0, 0.0}; // m/s^2 (accelerometer)
+    cv::Vec3d linearAccel{0.0, 0.0, 0.0}; // m/s^2 specific force in body frame
 };
 
 struct LidarPoint {
@@ -87,7 +87,7 @@ class UAVHybridSLAM {
 public:
     explicit UAVHybridSLAM(CameraModel camera, const HybridSlamConfig& config = {});
 
-    // High-rate IMU pre-integration and kinematic state propagation (400Hz)
+    // Integrate one timestamped body-frame gyro and accelerometer sample.
     void processImu(const ImuMeasurement& imu);
 
     // Synchronized multi-modal frame processing
@@ -116,6 +116,7 @@ private:
     std::vector<UAVState> trajectory_;
 
     std::int64_t lastImuTimestampNs_{0};
+    bool hasImuTimestamp_{};
     cv::Mat previousRawImage_;
     std::vector<cv::Point2f> previousPoints_;
     std::vector<int> previousLandmarkIds_;
