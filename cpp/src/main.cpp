@@ -353,7 +353,7 @@ void printUsage(const char* executable) {
         << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N]"
            " [--enter-recovery-below VALUE] [--exit-recovery-above VALUE]"
            " [--uav-hybrid] [--test-shock SHOCK] [--fps N] [--gui]\n"
-        << "  LIST: comma-separated none,blur,low_light,noise\n"
+        << "  LIST: comma-separated none,blur,low_light,noise,sudden_dim\n"
         << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
@@ -539,7 +539,7 @@ int main(int argc, char** argv) {
                 }
 
                 if (i == 0 || (i + 1) % printInterval == 0 || i + 1 == sequence.frames.size()) {
-                    std::cout << "[RViz] Fixed Frame: map  |  Displays: PointCloud2 /cloud_registered, Odometry /state_estimation/odometry\n"
+                    std::cout << "[Visualization] OpenCV RViz-style view; no ROS topics are published\n"
                               << "[3D] frame=" << (i + 1) << '/' << sequence.frames.size()
                               << " mode=" << adaptive_slam::hybridModeName(state.mode)
                               << " confidence=" << std::fixed << std::setprecision(3) << state.confidence

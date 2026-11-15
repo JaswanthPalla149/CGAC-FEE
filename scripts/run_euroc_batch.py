@@ -13,7 +13,7 @@ import subprocess
 from download_euroc import validate_euroc_sequence
 
 
-DEGRADATIONS = ("none", "blur", "low_light", "noise")
+DEGRADATIONS = ("none", "blur", "low_light", "noise", "sudden_dim")
 
 
 def find_sequences(root):
