@@ -32,7 +32,8 @@ namespace adaptive_slam {
 namespace {
 
 const std::vector<std::string> kModes{"fixed_low", "fixed_high", "adaptive"};
-const std::vector<std::string> kDegradations{"none", "blur", "low_light", "noise"};
+const std::vector<std::string> kDegradations{
+    "none", "blur", "low_light", "noise", "sudden_dim"};
 
 std::vector<std::string> splitCsvLine(const std::string& line) {
     std::vector<std::string> values;
@@ -676,7 +677,8 @@ std::optional<cv::Matx33d> integrateGyroscopeRotation(
 }
 
 cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
-                         std::uint32_t seed) {
+                         std::uint32_t seed, std::size_t frameIndex,
+                         std::size_t frameCount) {
     if (degradation == "none") {
         return image;
     }
@@ -688,6 +690,14 @@ cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
     if (degradation == "low_light") {
         cv::Mat output;
         image.convertTo(output, image.type(), 0.45, -18.0);
+        return output;
+    }
+    if (degradation == "sudden_dim") {
+        if (frameIndex < frameCount / 2) {
+            return image;
+        }
+        cv::Mat output;
+        image.convertTo(output, image.type(), 0.30, 0.0);
         return output;
     }
     if (degradation == "noise") {
@@ -742,7 +752,8 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
             throw std::runtime_error("failed to load image " + frame.imagePath.string());
         }
         image = applyDegradation(image, degradation,
-                                 seed + static_cast<std::uint32_t>(i));
+                                 seed + static_cast<std::uint32_t>(i), i,
+                                 sequence.frames.size());
         std::optional<cv::Matx33d> gyroRotationPrior;
         if (i > 0) {
             gyroRotationPrior = integrateGyroscopeRotation(

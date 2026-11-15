@@ -37,7 +37,7 @@ The sequence should contain `mav0\cam0\data.csv`, `mav0\cam0\data\`, and `mav0\c
 Run all four synthetic visual conditions:
 
 ```powershell
-.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence C:\datasets\MH_01_easy --output results --degradations none,blur,low_light,noise --threads 1
+.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence C:\datasets\MH_01_easy --output results --degradations none,blur,low_light,noise,sudden_dim --threads 1
 ```
 
 `--threads` controls OpenCV's worker count and defaults to one to avoid uncontrolled CPU parallelism in power comparisons. Run each configuration under the same thread setting and machine conditions.
@@ -75,7 +75,7 @@ outputs, a combined summary, and a campaign manifest:
 python scripts\download_euroc.py --sequence MH_03_medium --output datasets --force-download
 python scripts\download_euroc.py --sequence MH_05_difficult --output datasets --force-download
 python scripts\download_euroc.py --sequence V1_01_easy --output datasets --force-download
-python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root datasets --output results\euroc_campaign --degradations none,blur,low_light,noise --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60
+python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root datasets --output results\euroc_campaign --degradations none,blur,low_light,noise,sudden_dim --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60
 python scripts\analyze_benchmark.py --input results\euroc_campaign\summary.csv --output results\euroc_campaign\comparisons.csv
 ```
 
@@ -96,6 +96,11 @@ The native implementation uses OpenCV's optimized kernels, reuses the CLAHE oper
 This is a research baseline, not an ORB-SLAM3 equivalent. Monocular translation scale is arbitrary. Gyro is used only as a rotation prior; this is not full visual-inertial odometry. There is no loop closure, relocalization after tracking loss, bundle adjustment, place recognition, or stereo/inertial fusion. The map is incrementally triangulated and is not globally optimized, so drift and bad map points can accumulate.
 
 ATE and RPE use timestamp-interpolated ground truth and per-run similarity alignment; these are not metric-scale errors and can hide monocular scale drift. Blur, low-light, and seeded additive-noise conditions are synthetic approximations, not calibrated camera or environment models. The available synthetic sequence has limited scene/motion diversity. Repeat timing and package-energy trials, keep the same machine conditions, and report the shared CPU-package scope when presenting results.
+
+`sudden_dim` applies a deterministic 0.30 image-gain step from the middle frame to the end of the
+sequence in the evaluator. It is a controlled digital perturbation, not a measured real-world
+illumination event. Use identical input sequences and report this condition separately from ordinary
+sequence-wide `low_light` degradation.
 
 The ORB-SLAM3 paper is cited as related work only. This project has no ORB-SLAM3
 checkout, measured baseline, or evidence for an energy or latency advantage over
@@ -179,7 +184,7 @@ Before starting, keep the shell wrappers normalized to LF and run them directly 
 root. Do not paste Windows `\r` text or add a literal backslash as a command argument. The wrappers
 provide the top-level FAST-LIVO workflow while running the native C++ benchmark.
 
-Generate a synthetic EuRoC sequence and bag:
+Generate a synthetic EuRoC-format sequence and EcoLIVO replay manifest:
 
 ```bash
 python3 scripts/generate_synthetic_euroc.py \
@@ -203,8 +208,8 @@ Start the EcoLIVO node. ROS launch arguments use `name:=value` syntax:
 T1 remains attached to the benchmark process and writes live terminal output to
 `.eco_mapping.log`. Keep this terminal running while T2 is played from another terminal.
 
-The launch displays a ROS-style startup summary and an RViz-equivalent 3D terminal visualization
-for synthetic LiDAR points and the estimated trajectory. This is a live terminal 3D display;
+The launch runs an OpenCV RViz-style visualization for synthetic LiDAR points and the estimated
+trajectory. It is not a ROS node, does not publish ROS topics, and does not open genuine RViz.
 EcoLIVO does not create video recordings.
 
 This is the simulator equivalent of:
@@ -217,7 +222,7 @@ fast_livo mapping_avia.launch
 The mapping process writes PID 1371 style information to `.eco_mapping.pid` and output to
 `.eco_mapping.log`.
 
-#### T2: play the synthetic rosbag
+#### T2: run the synthetic replay wrapper
 
 For the FAST-LIVO-style command shown below, WSL automatically maps
 `./bags/Retail_Street.bag` to the generated EcoLIVO synthetic bag and enables the RViz-style GUI:
@@ -226,7 +231,7 @@ For the FAST-LIVO-style command shown below, WSL automatically maps
 ./scripts/rosbag play ./bags/Retail_Street.bag --fps 1
 ```
 
-The generated-bag form is also supported:
+The generated-manifest form is also supported:
 
 ```bash
 ./scripts/rosbag play ./synthetic/ecolivo-wsl/EcoLIVO_Retail_Street.bag

@@ -45,6 +45,86 @@ python3 scripts/generate_synthetic_euroc.py \
 The generated scene is for checking that the loader, executable, and CSV output work. It is not a
 replacement for EuRoC ground-truth evaluation.
 
+### Install EuRoC manually when the downloader times out
+
+EuRoC is **not needed** to show the synthetic RViz-style simulation. It **is needed** to report
+measured trajectory accuracy on recorded camera data. The current hybrid demo still synthesizes its
+LiDAR scan and stationary IMU input, so running it on EuRoC images does not turn it into a real
+LiDAR/IMU fusion evaluation. When ground truth is present, the hybrid demo uses its poses to place
+the simulated LiDAR scan and initialize the path; therefore its rendered trajectory/ATE is not an
+independent accuracy result. Use the separate monocular evaluator outputs for EuRoC trajectory
+metrics.
+
+The official ASL page now links to the ETH Research Collection. Download the room archive that
+contains the sequences you need, extract the room archive, then extract each sequence's inner ZIP.
+The Machine Hall archive is about 12 GB and Vicon Room 1 is about 5.8 GB. Keep the downloaded
+archives outside Git; the repository ignores `datasets/`.
+
+For a compact initial validation, install `MH_01_easy`, `MH_03_medium`, and `V1_03_difficult`.
+Create these final paths, with the sequence's `mav0` directory directly underneath each sequence:
+
+```text
+datasets/MH_01_easy/mav0/cam0/data.csv
+datasets/MH_01_easy/mav0/imu0/data.csv
+datasets/MH_01_easy/mav0/state_groundtruth_estimate0/data.csv
+```
+
+For example, after downloading the Machine Hall and Vicon Room 1 ZIP archives, extract the outer
+archives, then extract the selected inner sequence ZIPs into their final sequence directories. The
+outer archive's directory names are `machine_hall` and `vicon_room1`:
+
+```bash
+unzip machine_hall.zip -d /tmp/euroc_mh
+unzip /tmp/euroc_mh/machine_hall/MH_01_easy/MH_01_easy.zip -d datasets/MH_01_easy
+unzip /tmp/euroc_mh/machine_hall/MH_03_medium/MH_03_medium.zip -d datasets/MH_03_medium
+unzip vicon_room1.zip -d /tmp/euroc_v1
+unzip /tmp/euroc_v1/vicon_room1/V1_03_difficult/V1_03_difficult.zip -d datasets/V1_03_difficult
+```
+
+Repeat that layout for each sequence. If you downloaded the ZIPs in Windows, they can be extracted
+there and accessed under `/mnt/c/...` from WSL, or extracted with `unzip` in WSL. Validate that the
+camera index points to existing image files and that `cam0/sensor.yaml` is present. Then run the
+project validator and a single-sequence smoke run:
+
+```bash
+python3 scripts/download_euroc.py --sequence MH_01_easy --output datasets
+./build-wsl/cpp/adaptive_slam_benchmark \
+  --sequence datasets/MH_01_easy --output results/MH_01_easy-smoke --threads 1
+```
+
+The downloader command above validates an already-installed sequence without replacing it. To
+install manually downloaded archives, first arrange the final directory layout shown above; the
+validator will check the full camera, IMU, and ground-truth data. Do not rename a partial or
+synthetic sequence as EuRoC. If the old per-sequence download link times out, use the ETH Research
+Collection archive linked from the official [EuRoC page](https://projects.asl.ethz.ch/datasets/euroc-mav/).
+
+The evaluator now supports `sudden_dim`: a deterministic 0.30 image-gain step from the middle frame
+through the end of the sequence. This makes a controlled digital brightness-shock condition with
+shock-specific ATE/RPE and tracking metrics. It is still a synthetic perturbation, not a calibrated
+real-world lighting change. The separate `--test-shock` path remains a visualization-only blackout,
+glare, or flicker effect and does not produce evaluator metrics. Run the same real sequences with
+`none`, `low_light`, and `sudden_dim` across fixed-low, fixed-high, and adaptive configurations;
+repeat under the same machine settings and report ATE/RPE, tracking failures, and latency. Do not
+claim robustness against ORB-SLAM3 or DROID unless those systems are actually run on the same inputs
+and protocol. If time only permits the project's own method, present it as a controlled perturbation
+study and list external systems as related work.
+
+After the three full sequences validate, run the compact final campaign from the repository root:
+
+```bash
+python3 scripts/run_euroc_batch.py \
+  --benchmark build-wsl/cpp/adaptive_slam_benchmark \
+  --dataset-root datasets \
+  --output results/euroc_final \
+  --degradations none,low_light,sudden_dim \
+  --threads 1 \
+  --repeats 5
+```
+
+This is 3 sequences × 3 image conditions × 3 tracking configurations × 5 repeats (135 runs). It
+does not include an ORB-SLAM3 or DROID baseline. Keep the generated CSVs and use their means and
+standard deviations in the report; if the deadline permits fewer repeats, state the actual count.
+
 ### ROS 2 and WSLg visualization
 
 Install the ROS desktop package only if ROS tools/RViz are needed. Follow the [official Jazzy
@@ -76,8 +156,9 @@ ros2 run demo_nodes_py listener
 **Important:** installing ROS and starting RViz does not connect RViz to this benchmark. The current
 program does not publish ROS messages or implement a ROS node. Its `scripts/roslaunch` and
 `scripts/rosbag` files are project-specific shell wrappers, not the ROS commands. The hybrid demo's
-LiDAR and IMU are simulated, and the visible panel/snapshot is an OpenCV visualization. To show this
-map in genuine RViz, a ROS 2 adapter must publish at least `nav_msgs/Odometry` (and the transform
+LiDAR and IMU are simulated, and the visible panel/snapshot is an OpenCV RViz-style visualization.
+The wrapper output now labels it as a simulation and does not claim to advertise ROS topics. To show
+this map in genuine RViz, a ROS 2 adapter must publish at least `nav_msgs/Odometry` (and the transform
 tree) and `sensor_msgs/PointCloud2`, with a valid frame ID and timestamps.
 
 ### Power measurement considerations
@@ -92,6 +173,29 @@ The WSL host used for the current smoke run was an AMD Ryzen 9 8945HS, Ubuntu 20
 RAPL energy counter or `perf` executable was available there. Battery charge percentage alone does
 not reveal workload power. Do not infer watts or joules from frame latency, CPU time, or the
 displayed model-only energy.
+
+You can check whether Windows exposes a host counter even when WSL does not expose Linux RAPL:
+
+```bash
+typeperf.exe -q | grep -i "Energy Meter"
+```
+
+If `\\Energy Meter(RAPL_Package0_PKG)\\Energy` is listed, sample it from a Windows PowerShell
+window while the WSL benchmark runs:
+
+```powershell
+typeperf "\Energy Meter(RAPL_Package0_PKG)\Energy" -si 1 `
+  -o "$env:USERPROFILE\Desktop\euroc-energy.csv"
+```
+
+Stop the logger after the run with Ctrl+C. Compute energy as the final minus initial cumulative
+counter value (pWh) times `3.6e-9` joules/pWh; divide by elapsed seconds for average package watts,
+and by processed frames for joules/frame. Keep the raw counter delta and report it as shared
+CPU-package energy; if you also report an idle-adjusted estimate, measure the idle rate separately
+for the same duration and label the subtraction. The Linux benchmark will still say
+`not_measured` because this external Windows sample is not integrated into its CSV. If Windows
+does not list a suitable counter, use a calibrated external power meter or report energy as
+unavailable. Never substitute the UAV demo's MAC formula for measured energy.
 
 ## Results generated in this workspace
 
