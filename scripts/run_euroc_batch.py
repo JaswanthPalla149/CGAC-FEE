@@ -10,6 +10,8 @@ from pathlib import Path
 import platform
 import subprocess
 
+from download_euroc import validate_euroc_sequence
+
 
 DEGRADATIONS = ("none", "blur", "low_light", "noise")
 
@@ -18,10 +20,16 @@ def find_sequences(root):
     root = root.resolve()
     candidates = [root]
     candidates.extend(sorted(path for path in root.iterdir() if path.is_dir()))
-    return [
-        path for path in candidates
-        if (path / "mav0" / "cam0" / "sensor.yaml").is_file()
-    ]
+    sequences = []
+    for path in candidates:
+        if not (path / "mav0" / "cam0" / "sensor.yaml").is_file():
+            continue
+        try:
+            validate_euroc_sequence(path)
+        except (OSError, ValueError):
+            continue
+        sequences.append(path)
+    return sequences
 
 
 def parse_degradations(value):
@@ -39,6 +47,24 @@ def sha256_file(path):
     with path.open("rb") as source:
         for block in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(block)
+    return digest.hexdigest()
+
+
+def camera_fingerprint(sequence):
+    digest = hashlib.sha256()
+    frame_csv = sequence / "mav0" / "cam0" / "data.csv"
+    with frame_csv.open("rb") as source:
+        digest.update(source.read())
+    frame_index = sequence / "mav0" / "cam0" / "data.csv"
+    with frame_index.open(newline="", encoding="utf-8-sig") as source:
+        frames = (
+            row for row in csv.reader(source)
+            if row and not row[0].lstrip().startswith("#")
+        )
+        for _, filename in zip(range(16), frames):
+            image = sequence / "mav0" / "cam0" / "data" / filename[1]
+            with image.open("rb") as image_file:
+                digest.update(image_file.read())
     return digest.hexdigest()
 
 
@@ -74,10 +100,22 @@ def main():
         parser.error(f"dataset root does not exist: {dataset_root}")
     sequences = find_sequences(dataset_root)
     if not sequences:
-        parser.error(f"no EuRoC sequences found under {dataset_root}")
+        parser.error(
+            f"no full EuRoC sequences found under {dataset_root}; each sequence "
+            "must have at least 1000 camera frames plus complete IMU and ground truth"
+        )
     names = [path.name for path in sequences]
     if len(set(names)) != len(names):
         parser.error("sequence directory names must be unique for campaign output")
+    fingerprints = {}
+    for sequence in sequences:
+        fingerprint = camera_fingerprint(sequence)
+        if fingerprint in fingerprints:
+            parser.error(
+                f"{sequence.name} and {fingerprints[fingerprint]} have identical "
+                "camera streams; refusing to count a copied sequence twice"
+            )
+        fingerprints[fingerprint] = sequence.name
 
     output.mkdir(parents=True, exist_ok=True)
     all_rows = []
@@ -123,6 +161,9 @@ def main():
         "benchmark_sha256": sha256_file(benchmark),
         "dataset_root": str(dataset_root),
         "sequences": [str(path) for path in sequences],
+        "sequence_frame_counts": {
+            path.name: validate_euroc_sequence(path) for path in sequences
+        },
         "degradations": args.degradations,
         "opencv_threads": args.threads,
         "repeats": args.repeats,

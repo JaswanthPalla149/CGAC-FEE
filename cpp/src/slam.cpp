@@ -32,6 +32,18 @@ cv::Mat cameraMatrix(const CameraModel& camera) {
     return cv::Mat(camera.matrix()).clone();
 }
 
+std::vector<cv::Point2f> geometryPoints(
+    const std::vector<cv::Point2f>& points, const CameraModel& camera) {
+    if (cv::norm(camera.distortion) == 0.0) {
+        return points;
+    }
+    std::vector<cv::Point2f> undistorted;
+    cv::undistortPoints(points, undistorted, cameraMatrix(camera),
+                        cv::Mat(camera.distortion), cv::noArray(),
+                        cameraMatrix(camera));
+    return undistorted;
+}
+
 double median(std::vector<double> values) {
     if (values.empty()) {
         return std::numeric_limits<double>::infinity();
@@ -119,7 +131,8 @@ std::vector<cv::Point2f> FeatureSLAM::detect(const cv::Mat& image,
 
 FrameResult FeatureSLAM::process(const cv::Mat& image,
                                  std::int64_t timestampNs,
-                                 TrackingMode mode) {
+                                 TrackingMode mode,
+                                 std::optional<cv::Matx33d> gyroRotationPrior) {
     const auto start = std::chrono::steady_clock::now();
     cv::Mat rawGray;
     if (image.channels() == 1) {
@@ -148,6 +161,7 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
         previousLandmarkIds_.assign(previousPoints_.size(), -1);
         keyframes_.push_back({timestampNs, rotationWorldCamera_, positionWorld_});
         result.position = positionWorld_;
+        result.trackingSucceeded = true;
         result.confidence = 1.0;
         result.trackedRatio = 1.0;
         result.activeFeatures = previousPoints_.size();
@@ -215,7 +229,11 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
             static_cast<double>(newTracked.size()) /
             static_cast<double>(std::max<std::size_t>(1, previousPoints_.size()));
         if (newTracked.size() >= 5) {
-            const auto mapPose = estimatePoseFromMap(newTracked, trackedIds);
+            const std::vector<cv::Point2f> oldGeometry =
+                geometryPoints(oldTracked, camera_);
+            const std::vector<cv::Point2f> newGeometry =
+                geometryPoints(newTracked, camera_);
+            const auto mapPose = estimatePoseFromMap(newGeometry, trackedIds);
             if (mapPose.has_value()) {
                 inlierRatio = mapPose->inlierRatio;
                 reprojectionError = mapPose->medianError;
@@ -223,15 +241,15 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
                 mapInlierCount = mapPose->inlierCount;
                 poseUpdated = true;
             } else {
-                poseUpdated = estimateMotion(oldTracked, newTracked, inlierRatio,
-                                             reprojectionError, inlierCount);
+                poseUpdated = estimateMotion(oldGeometry, newGeometry, inlierRatio,
+                                             reprojectionError, inlierCount,
+                                             gyroRotationPrior);
+            }
+            if (poseUpdated) {
+                triangulateNewLandmarks(oldGeometry, newGeometry, trackedIds,
+                                        previousRotation, previousPosition);
             }
         }
-    }
-
-    if (poseUpdated) {
-        triangulateNewLandmarks(oldTracked, newTracked, trackedIds,
-                                previousRotation, previousPosition);
     }
 
     const int maxCorners = settingsFor(mode).maxCorners;
@@ -290,24 +308,45 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
 bool FeatureSLAM::estimateMotion(
     const std::vector<cv::Point2f>& oldPoints,
     const std::vector<cv::Point2f>& newPoints, double& inlierRatio,
-    double& reprojectionError, int& inlierCount) {
+    double& reprojectionError, int& inlierCount,
+    const std::optional<cv::Matx33d>& gyroRotationPrior) {
     inlierRatio = 0.0;
     reprojectionError = std::numeric_limits<double>::infinity();
     inlierCount = 0;
     if (oldPoints.size() < 5 || oldPoints.size() != newPoints.size()) {
         return false;
     }
+    std::vector<cv::Point2f> rotationCompensatedPoints = newPoints;
+    if (gyroRotationPrior.has_value()) {
+        for (std::size_t i = 0; i < newPoints.size(); ++i) {
+            const cv::Vec3d ray(
+                (newPoints[i].x - camera_.cx) / camera_.fx,
+                (newPoints[i].y - camera_.cy) / camera_.fy, 1.0);
+            const cv::Vec3d compensated =
+                gyroRotationPrior->t() * ray;
+            if (compensated[2] <= 1e-8) {
+                return false;
+            }
+            rotationCompensatedPoints[i] = cv::Point2f(
+                static_cast<float>(camera_.fx * compensated[0] /
+                                       compensated[2] +
+                                   camera_.cx),
+                static_cast<float>(camera_.fy * compensated[1] /
+                                       compensated[2] +
+                                   camera_.cy));
+        }
+    }
     cv::Mat mask;
     const cv::Mat essential = cv::findEssentialMat(
-        oldPoints, newPoints, cameraMatrix(camera_), cv::RANSAC, 0.999, 1.0,
-        mask);
+        oldPoints, rotationCompensatedPoints, cameraMatrix(camera_),
+        cv::RANSAC, 0.999, 1.0, mask);
     if (essential.empty()) {
         return false;
     }
     cv::Mat rotation;
     cv::Mat translation;
-    cv::recoverPose(essential, oldPoints, newPoints, cameraMatrix(camera_),
-                    rotation, translation, mask);
+    cv::recoverPose(essential, oldPoints, rotationCompensatedPoints,
+                    cameraMatrix(camera_), rotation, translation, mask);
     mask = mask.reshape(1, 1);
     for (int i = 0; i < mask.rows * mask.cols; ++i) {
         inlierCount += mask.ptr<unsigned char>()[i] != 0 ? 1 : 0;
@@ -334,8 +373,8 @@ bool FeatureSLAM::estimateMotion(
             (oldPoints[i].x - camera_.cx) / camera_.fx,
             (oldPoints[i].y - camera_.cy) / camera_.fy, 1.0);
         const cv::Vec3d second(
-            (newPoints[i].x - camera_.cx) / camera_.fx,
-            (newPoints[i].y - camera_.cy) / camera_.fy, 1.0);
+            (rotationCompensatedPoints[i].x - camera_.cx) / camera_.fx,
+            (rotationCompensatedPoints[i].y - camera_.cy) / camera_.fy, 1.0);
         const cv::Vec3d lineSecond = essentialMatrix * first;
         const cv::Vec3d lineFirst = essentialMatrix.t() * second;
         const double residual = second.dot(lineSecond);
@@ -361,9 +400,13 @@ bool FeatureSLAM::estimateMotion(
             relativeRotation(row, column) = rotation64.at<double>(row, column);
         }
     }
-    const cv::Vec3d relativeTranslation(
+    cv::Vec3d relativeTranslation(
         translation64.at<double>(0), translation64.at<double>(1),
         translation64.at<double>(2));
+    if (gyroRotationPrior.has_value()) {
+        relativeRotation = *gyroRotationPrior * relativeRotation;
+        relativeTranslation = *gyroRotationPrior * relativeTranslation;
+    }
     positionWorld_ += rotationWorldCamera_ *
                       (-relativeRotation.t() * relativeTranslation);
     rotationWorldCamera_ = rotationWorldCamera_ * relativeRotation.t();

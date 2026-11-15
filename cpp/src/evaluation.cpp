@@ -53,6 +53,45 @@ bool isCommentOrEmpty(const std::string& line) {
     return first == std::string::npos || line[first] == '#';
 }
 
+cv::Matx33d bodyFromSensorRotation(const std::filesystem::path& sensorPath) {
+    std::ifstream sensor(sensorPath);
+    if (!sensor) {
+        throw std::runtime_error("cannot read sensor calibration " +
+                                 sensorPath.string());
+    }
+    const std::regex numberPattern(
+        R"([-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)");
+    cv::Matx33d rotation = cv::Matx33d::eye();
+    std::string line;
+    bool inTransform = false;
+    int row = 0;
+    while (std::getline(sensor, line)) {
+        if (line.find("T_BS:") != std::string::npos) {
+            inTransform = true;
+            continue;
+        }
+        if (!inTransform) {
+            continue;
+        }
+        std::vector<double> values;
+        for (std::sregex_iterator value(line.begin(), line.end(), numberPattern),
+             end;
+             value != end; ++value) {
+            values.push_back(std::stod(value->str()));
+        }
+        if (values.size() < 4) {
+            continue;
+        }
+        for (int column = 0; column < 3; ++column) {
+            rotation(row, column) = values[static_cast<std::size_t>(column)];
+        }
+        if (++row == 3) {
+            return rotation;
+        }
+    }
+    throw std::runtime_error("missing T_BS rotation in " + sensorPath.string());
+}
+
 std::int64_t processRssBytes() {
 #ifdef _WIN32
     PROCESS_MEMORY_COUNTERS counters{};
@@ -336,22 +375,28 @@ double alignedAte(const std::vector<cv::Vec3d>& estimate,
 }
 
 double alignedRpeTranslationRmse(
-    const std::vector<cv::Vec3d>& estimate,
-    const std::vector<cv::Vec3d>& target,
+    const std::vector<FrameResult>& frames,
+    const std::vector<std::optional<cv::Vec3d>>& groundTruth,
     const SimilarityAlignment& alignment) {
-    if (estimate.size() != target.size() || estimate.size() < 2) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
     double squaredError = 0.0;
-    for (std::size_t i = 1; i < estimate.size(); ++i) {
+    std::size_t validPairs = 0;
+    for (std::size_t i = 1; i < frames.size(); ++i) {
+        if (!frames[i - 1].trackingSucceeded || !frames[i].trackingSucceeded ||
+            !groundTruth[i - 1].has_value() || !groundTruth[i].has_value()) {
+            continue;
+        }
         const cv::Vec3d estimateDelta =
-            applyAlignment(estimate[i], alignment) -
-            applyAlignment(estimate[i - 1], alignment);
-        const cv::Vec3d targetDelta = target[i] - target[i - 1];
+            alignment.scale * alignment.rotation *
+            (frames[i].position - frames[i - 1].position);
+        const cv::Vec3d targetDelta = *groundTruth[i] - *groundTruth[i - 1];
         const cv::Vec3d residual = estimateDelta - targetDelta;
         squaredError += residual.dot(residual);
+        ++validPairs;
     }
-    return std::sqrt(squaredError / static_cast<double>(estimate.size() - 1));
+    if (validPairs == 0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return std::sqrt(squaredError / static_cast<double>(validPairs));
 }
 
 void writeFrameRows(const std::filesystem::path& path,
@@ -428,6 +473,8 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
     }
     const std::regex intrinsicsPattern(
         R"(intrinsics\s*:\s*\[\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\])");
+    const std::regex distortionPattern(
+        R"(distortion_coefficients\s*:\s*\[\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*,\s*([-+0-9.eE]+)\s*\])");
     std::smatch match;
     std::string line;
     CameraModel camera;
@@ -437,7 +484,10 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
             camera = {std::stod(match[1]), std::stod(match[2]),
                       std::stod(match[3]), std::stod(match[4])};
             foundIntrinsics = true;
-            break;
+        } else if (std::regex_search(line, match, distortionPattern)) {
+            camera.distortion = {
+                std::stod(match[1]), std::stod(match[2]),
+                std::stod(match[3]), std::stod(match[4])};
         }
     }
     if (!foundIntrinsics || camera.fx <= 0.0 || camera.fy <= 0.0) {
@@ -470,6 +520,55 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
         throw std::runtime_error("no images found in " + imageDirectory.string());
     }
 
+    const std::filesystem::path imuDirectory =
+        sequencePath / "mav0" / "imu0";
+    const std::filesystem::path imuPath = imuDirectory / "data.csv";
+    if (std::filesystem::is_regular_file(imuPath)) {
+        const std::filesystem::path imuCalibrationPath =
+            imuDirectory / "sensor.yaml";
+        if (std::filesystem::is_regular_file(imuCalibrationPath)) {
+            const cv::Matx33d bodyFromCamera =
+                bodyFromSensorRotation(calibrationPath);
+            const cv::Matx33d bodyFromImu =
+                bodyFromSensorRotation(imuCalibrationPath);
+            sequence.cameraFromImu = bodyFromCamera.t() * bodyFromImu;
+        }
+        std::ifstream imu(imuPath);
+        std::int64_t previousImuTimestamp = -1;
+        while (std::getline(imu, line)) {
+            if (isCommentOrEmpty(line)) {
+                continue;
+            }
+            const auto columns = splitCsvLine(line);
+            if (columns.size() < 4) {
+                throw std::runtime_error(
+                    "invalid IMU CSV row in " + imuPath.string());
+            }
+            try {
+                GyroscopeSample sample;
+                sample.timestampNs = std::stoll(columns[0]);
+                sample.angularVelocity = cv::Vec3d(
+                    std::stod(columns[1]), std::stod(columns[2]),
+                    std::stod(columns[3]));
+                if (sample.timestampNs <= previousImuTimestamp ||
+                    !std::isfinite(sample.angularVelocity[0]) ||
+                    !std::isfinite(sample.angularVelocity[1]) ||
+                    !std::isfinite(sample.angularVelocity[2])) {
+                    throw std::runtime_error(
+                        "invalid or unordered IMU sample in " + imuPath.string());
+                }
+                previousImuTimestamp = sample.timestampNs;
+                sequence.gyroscope.push_back(sample);
+            } catch (const std::invalid_argument&) {
+                throw std::runtime_error(
+                    "invalid IMU value in " + imuPath.string());
+            } catch (const std::out_of_range&) {
+                throw std::runtime_error(
+                    "out-of-range IMU value in " + imuPath.string());
+            }
+        }
+    }
+
     const std::filesystem::path truthPath =
         sequencePath / "mav0" / "state_groundtruth_estimate0" / "data.csv";
     std::ifstream truth(truthPath);
@@ -497,6 +596,83 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
         }
     }
     return sequence;
+}
+
+std::optional<cv::Matx33d> integrateGyroscopeRotation(
+    const std::vector<GyroscopeSample>& samples,
+    std::int64_t startTimestampNs, std::int64_t endTimestampNs,
+    const cv::Matx33d& cameraFromImu) {
+    if (samples.size() < 2 || endTimestampNs <= startTimestampNs ||
+        startTimestampNs < samples.front().timestampNs ||
+        endTimestampNs > samples.back().timestampNs) {
+        return std::nullopt;
+    }
+
+    const auto gyroAt = [&samples](std::int64_t timestamp)
+        -> std::optional<cv::Vec3d> {
+        const auto upper = std::lower_bound(
+            samples.begin(), samples.end(), timestamp,
+            [](const GyroscopeSample& sample, std::int64_t value) {
+                return sample.timestampNs < value;
+            });
+        if (upper == samples.end()) {
+            return std::nullopt;
+        }
+        if (upper->timestampNs == timestamp) {
+            return upper->angularVelocity;
+        }
+        if (upper == samples.begin()) {
+            return std::nullopt;
+        }
+        const GyroscopeSample& left = *(upper - 1);
+        const double fraction =
+            static_cast<double>(timestamp - left.timestampNs) /
+            static_cast<double>(upper->timestampNs - left.timestampNs);
+        return left.angularVelocity * (1.0 - fraction) +
+               upper->angularVelocity * fraction;
+    };
+
+    const auto startRate = gyroAt(startTimestampNs);
+    const auto endRate = gyroAt(endTimestampNs);
+    if (!startRate.has_value() || !endRate.has_value()) {
+        return std::nullopt;
+    }
+    std::vector<GyroscopeSample> interval;
+    interval.push_back({startTimestampNs, *startRate});
+    for (const GyroscopeSample& sample : samples) {
+        if (sample.timestampNs > startTimestampNs &&
+            sample.timestampNs < endTimestampNs) {
+            interval.push_back(sample);
+        }
+    }
+    interval.push_back({endTimestampNs, *endRate});
+
+    cv::Matx33d relativeRotation = cv::Matx33d::eye();
+    for (std::size_t i = 1; i < interval.size(); ++i) {
+        const double dt =
+            static_cast<double>(interval[i].timestampNs -
+                                interval[i - 1].timestampNs) *
+            1e-9;
+        const cv::Vec3d angularVelocity =
+            cameraFromImu *
+            ((interval[i - 1].angularVelocity + interval[i].angularVelocity) *
+             0.5);
+        const cv::Vec3d rotationVector = -angularVelocity * dt;
+        const double angle = cv::norm(rotationVector);
+        const cv::Matx33d skew(
+            0.0, -rotationVector[2], rotationVector[1],
+            rotationVector[2], 0.0, -rotationVector[0],
+            -rotationVector[1], rotationVector[0], 0.0);
+        const double firstScale =
+            angle < 1e-8 ? 1.0 : std::sin(angle) / angle;
+        const double secondScale =
+            angle < 1e-8 ? 0.5 : (1.0 - std::cos(angle)) / (angle * angle);
+        const cv::Matx33d increment =
+            cv::Matx33d::eye() + firstScale * skew +
+            secondScale * (skew * skew);
+        relativeRotation = increment * relativeRotation;
+    }
+    return relativeRotation;
 }
 
 cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
@@ -567,7 +743,14 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         }
         image = applyDegradation(image, degradation,
                                  seed + static_cast<std::uint32_t>(i));
-        FrameResult result = slam.process(image, frame.timestampNs, mode);
+        std::optional<cv::Matx33d> gyroRotationPrior;
+        if (i > 0) {
+            gyroRotationPrior = integrateGyroscopeRotation(
+                sequence.gyroscope, sequence.frames[i - 1].timestampNs,
+                frame.timestampNs, sequence.cameraFromImu);
+        }
+        FrameResult result =
+            slam.process(image, frame.timestampNs, mode, gyroRotationPrior);
         results.push_back(result);
         const std::int64_t sampledRss = processRssBytes();
         if (sampledRss >= 0) {
@@ -613,18 +796,16 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     summary.modeTransitions = transitions;
 
     std::vector<double> latencies;
-    std::vector<cv::Vec3d> positions;
-    std::vector<std::int64_t> timestamps;
     std::size_t recoveryFrames = 0;
+    std::vector<std::optional<cv::Vec3d>> groundTruthByFrame(results.size());
     for (std::size_t i = 0; i < results.size(); ++i) {
         const FrameResult& result = results[i];
         latencies.push_back(result.elapsedMs);
-        positions.push_back(result.position);
-        timestamps.push_back(result.timestampNs);
         recoveryFrames += result.mode == TrackingMode::Recovery ? 1U : 0U;
         if (i > 0 && !result.trackingSucceeded) {
             ++summary.trackingFailures;
         }
+        summary.framesWithPose += result.trackingSucceeded ? 1U : 0U;
         summary.framesWithMapPose += result.mapInliers >= 12 ? 1U : 0U;
     }
     std::sort(latencies.begin(), latencies.end());
@@ -645,23 +826,42 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     if (sequence.groundTruth.has_value()) {
         std::vector<cv::Vec3d> matchedEstimates;
         std::vector<cv::Vec3d> matchedGroundTruth;
-        matchedEstimates.reserve(positions.size());
-        matchedGroundTruth.reserve(positions.size());
-        for (std::size_t i = 0; i < timestamps.size(); ++i) {
+        matchedEstimates.reserve(results.size());
+        matchedGroundTruth.reserve(results.size());
+        for (std::size_t i = 0; i < results.size(); ++i) {
             const auto truth =
-                interpolateGroundTruth(timestamps[i], *sequence.groundTruth);
+                interpolateGroundTruth(results[i].timestampNs,
+                                       *sequence.groundTruth);
             if (truth.has_value()) {
-                matchedEstimates.push_back(positions[i]);
-                matchedGroundTruth.push_back(*truth);
+                ++summary.groundTruthMatchedFrames;
+                groundTruthByFrame[i] = truth;
+                if (results[i].trackingSucceeded) {
+                    matchedEstimates.push_back(results[i].position);
+                    matchedGroundTruth.push_back(*truth);
+                }
             }
         }
-        const auto alignment =
-            estimateSimilarityAlignment(matchedEstimates, matchedGroundTruth);
-        if (alignment.has_value()) {
-            summary.ateRmse =
-                alignedAte(matchedEstimates, matchedGroundTruth, *alignment);
-            summary.rpeTranslationRmse = alignedRpeTranslationRmse(
-                matchedEstimates, matchedGroundTruth, *alignment);
+        if (summary.groundTruthMatchedFrames > 0) {
+            summary.poseCoverage =
+                static_cast<double>(matchedEstimates.size()) /
+                static_cast<double>(summary.groundTruthMatchedFrames);
+        }
+        if (summary.groundTruthMatchedFrames == 0) {
+            summary.trajectoryStatus = "no_matched_ground_truth";
+        } else if (summary.poseCoverage < 0.5) {
+            summary.trajectoryStatus = "insufficient_pose_coverage";
+        } else {
+            const auto alignment =
+                estimateSimilarityAlignment(matchedEstimates, matchedGroundTruth);
+            if (!alignment.has_value()) {
+                summary.trajectoryStatus = "alignment_failed";
+            } else {
+                summary.ateRmse =
+                    alignedAte(matchedEstimates, matchedGroundTruth, *alignment);
+                summary.rpeTranslationRmse = alignedRpeTranslationRmse(
+                    results, groundTruthByFrame, *alignment);
+                summary.trajectoryStatus = "evaluated";
+            }
         }
     }
 
@@ -707,7 +907,9 @@ void writeSummaries(const std::filesystem::path& outputPath,
         throw std::runtime_error("cannot write summary.csv");
     }
     output << "sequence,configuration,degradation,frames,map_landmarks,keyframes,"
-              "frames_with_map_pose,ate_rmse_similarity_aligned,"
+              "frames_with_map_pose,frames_with_pose,"
+              "ground_truth_matched_frames,pose_coverage,trajectory_status,"
+              "ate_rmse_similarity_aligned,"
               "rpe_translation_rmse_similarity_aligned,"
               "tracking_failure_frames,tracking_failure_rate,mean_latency_ms,"
               "p95_latency_ms,wall_time_s,cpu_time_s,rss_delta_bytes,"
@@ -720,7 +922,10 @@ void writeSummaries(const std::filesystem::path& outputPath,
         output << summary.sequence << ',' << summary.configuration << ','
                << summary.degradation << ',' << summary.frames << ','
                << summary.landmarks << ',' << summary.keyframes << ','
-               << summary.framesWithMapPose << ',' << summary.ateRmse << ','
+               << summary.framesWithMapPose << ',' << summary.framesWithPose
+               << ',' << summary.groundTruthMatchedFrames << ','
+               << summary.poseCoverage << ',' << summary.trajectoryStatus << ','
+               << summary.ateRmse << ','
                << summary.rpeTranslationRmse << ','
                << summary.trackingFailures << ',' << summary.failureRate << ','
                << summary.meanLatencyMs << ',' << summary.p95LatencyMs << ','

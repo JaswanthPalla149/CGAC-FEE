@@ -37,6 +37,7 @@ struct CameraModel {
     double fy{};
     double cx{};
     double cy{};
+    cv::Vec4d distortion{};
     cv::Matx33d matrix() const;
 };
 
@@ -66,7 +67,9 @@ public:
     explicit FeatureSLAM(CameraModel camera, int minInliers = 12,
                          int keyframeInterval = 10);
     FrameResult process(const cv::Mat& image, std::int64_t timestampNs,
-                        TrackingMode mode);
+                        TrackingMode mode,
+                        std::optional<cv::Matx33d> gyroRotationPrior =
+                            std::nullopt);
 
     const std::vector<cv::Point3d>& landmarks() const noexcept;
     const std::vector<Keyframe>& keyframes() const noexcept;
@@ -84,7 +87,8 @@ private:
     bool estimateMotion(const std::vector<cv::Point2f>& oldPoints,
                         const std::vector<cv::Point2f>& newPoints,
                         double& inlierRatio, double& reprojectionError,
-                        int& inlierCount);
+                        int& inlierCount,
+                        const std::optional<cv::Matx33d>& gyroRotationPrior);
     std::optional<PoseEstimate> estimatePoseFromMap(
         const std::vector<cv::Point2f>& imagePoints,
         const std::vector<int>& landmarkIds);
@@ -122,13 +126,24 @@ struct GroundTruth {
     std::vector<cv::Vec3d> positions;
 };
 
+struct GyroscopeSample {
+    std::int64_t timestampNs{};
+    cv::Vec3d angularVelocity{};
+};
+
 struct EuRoCSequence {
     CameraModel camera;
     std::vector<EuRoCFrame> frames;
     std::optional<GroundTruth> groundTruth;
+    std::vector<GyroscopeSample> gyroscope;
+    cv::Matx33d cameraFromImu{cv::Matx33d::eye()};
 };
 
 EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath);
+std::optional<cv::Matx33d> integrateGyroscopeRotation(
+    const std::vector<GyroscopeSample>& samples,
+    std::int64_t startTimestampNs, std::int64_t endTimestampNs,
+    const cv::Matx33d& cameraFromImu);
 cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
                          std::uint32_t seed);
 
@@ -140,8 +155,12 @@ struct RunSummary {
     std::size_t landmarks{};
     std::size_t keyframes{};
     std::size_t framesWithMapPose{};
+    std::size_t framesWithPose{};
+    std::size_t groundTruthMatchedFrames{};
     double ateRmse{std::numeric_limits<double>::quiet_NaN()};
     double rpeTranslationRmse{std::numeric_limits<double>::quiet_NaN()};
+    double poseCoverage{std::numeric_limits<double>::quiet_NaN()};
+    std::string trajectoryStatus{"no_ground_truth"};
     std::size_t trackingFailures{};
     double failureRate{};
     double meanLatencyMs{};

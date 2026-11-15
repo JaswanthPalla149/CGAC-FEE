@@ -2,6 +2,7 @@
 /build-wsl/
 /build-wsl-*/
 /synthetic/
+/datasets/
 /results/
 /results/perf/
 .eco_mapping.log

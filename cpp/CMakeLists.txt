@@ -42,4 +42,8 @@ if(BUILD_TESTING)
     add_executable(uav_hybrid_slam_test tests/uav_hybrid_slam_test.cpp)
     target_link_libraries(uav_hybrid_slam_test PRIVATE adaptive_slam)
     add_test(NAME uav_hybrid_slam_test COMMAND uav_hybrid_slam_test)
+
+    add_executable(imu_rotation_test tests/imu_rotation_test.cpp)
+    target_link_libraries(imu_rotation_test PRIVATE adaptive_slam)
+    add_test(NAME imu_rotation_test COMMAND imu_rotation_test)
 endif()
