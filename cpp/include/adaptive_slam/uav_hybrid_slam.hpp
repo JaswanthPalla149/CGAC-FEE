@@ -52,6 +52,9 @@ struct UAVState {
     HybridPowerMode mode{HybridPowerMode::LowCost};
     int visualInliers{0};
     int lidarInliers{0};
+    bool loopClosed{false};
+    int loopCandidateFrame{-1};
+    double loopDriftMeters{0.0};
     double elapsedMs{0.0};
     std::uint64_t estimatedMacCount{0};           // Hardware MAC count for power comparison
     double estimatedEnergyJoules{0.0};
@@ -100,6 +103,8 @@ public:
     const std::vector<UAVState>& trajectory() const noexcept { return trajectory_; }
     std::uint64_t totalMacOperations() const noexcept { return totalMacs_; }
     double totalEnergyJoules() const noexcept { return totalJoules_; }
+    std::size_t loopClosures() const noexcept { return loopClosures_; }
+    double maxLoopDriftMeters() const noexcept { return maxLoopDriftMeters_; }
 
     const std::vector<cv::Point3d>& globalLidarMap() const noexcept { return globalLidarMap_; }
     const std::vector<cv::Point3d>& currentScanWorld() const noexcept { return currentScanWorld_; }
@@ -109,6 +114,12 @@ public:
     void reset(const cv::Vec3d& initialPosition = {0.0, 0.0, 0.0});
 
 private:
+    struct LoopRecognitionKeyframe {
+        std::size_t frameIndex{};
+        std::vector<BinaryDescriptor> descriptors;
+        std::vector<cv::Vec3d> lidarPointsBody;
+    };
+
     CameraModel camera_;
     HybridSlamConfig config_;
     MultiSensorController controller_;
@@ -126,9 +137,17 @@ private:
 
     std::vector<cv::Point3d> globalLidarMap_;
     std::vector<cv::Point3d> currentScanWorld_;
+    std::vector<std::size_t> mapPointFrameIndices_;
+    std::vector<std::size_t> metricLandmarkFrameIndices_;
+    std::vector<PoseGraphPose> poseGraphPoses_;
+    std::vector<LoopRecognitionKeyframe> loopRecognitionKeyframes_;
 
     std::uint64_t totalMacs_{0};
     double totalJoules_{0.0};
+    std::size_t loopClosures_{0};
+    double maxLoopDriftMeters_{0.0};
+    std::size_t lastLoopClosureFrame_{};
+    bool hasLastLoopClosure_{false};
 
     // Internal low-MAC subroutines
     cv::Mat prepareImage(const cv::Mat& image, HybridPowerMode mode) const;
@@ -136,6 +155,14 @@ private:
     void updateLidarPoints(const LidarScan& scan, HybridPowerMode mode, int& lidarInliers);
     bool alignLidarScan(const LidarScan& scan, cv::Matx33d& deltaR, cv::Vec3d& deltaT, int& inliers, HybridPowerMode mode);
     void updateMap(const LidarScan& scan, const cv::Matx33d& R, const cv::Vec3d& t);
+    bool detectAndCloseLoop(std::size_t frameIndex,
+                            const std::vector<BinaryDescriptor>& descriptors,
+                            const LidarScan& scan);
+    void applyPoseGraphCorrection(
+        const std::vector<PoseGraphPose>& previousFramePoses,
+        const std::vector<std::size_t>& graphNodeFrames,
+        const std::vector<PoseGraphPose>& previousGraphPoses,
+        const std::vector<PoseGraphPose>& optimizedGraphPoses);
 };
 
 // Synthetic generator for testing sudden illumination collapse on UAVs (e.g. tunnel entry, solar flare)

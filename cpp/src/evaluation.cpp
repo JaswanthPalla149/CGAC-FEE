@@ -408,7 +408,9 @@ void writeFrameRows(const std::filesystem::path& path,
     }
     output << "timestamp_ns,x,y,z,confidence,tracked_ratio,inlier_ratio,"
               "reprojection_error_px,active_features,inliers,map_inliers,"
-              "elapsed_ms,mode,tracking_succeeded\n"
+              "elapsed_ms,mode,tracking_succeeded,loop_closed,"
+              "loop_candidate_keyframe,"
+              "loop_drift_before_optimization_estimate_units\n"
            << std::setprecision(10);
     for (const FrameResult& frame : frames) {
         output << frame.timestampNs << ',' << frame.position[0] << ','
@@ -418,7 +420,10 @@ void writeFrameRows(const std::filesystem::path& path,
                << frame.activeFeatures << ',' << frame.inliers << ','
                << frame.mapInliers << ',' << frame.elapsedMs << ','
                << modeName(frame.mode) << ','
-               << (frame.trackingSucceeded ? 1 : 0) << '\n';
+               << (frame.trackingSucceeded ? 1 : 0) << ','
+               << (frame.loopClosed ? 1 : 0) << ','
+               << frame.loopCandidateId << ','
+               << frame.loopDriftEstimateUnits << '\n';
     }
 }
 
@@ -773,6 +778,14 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
             mode = nextMode;
         }
     }
+    const auto& correctedPositions = slam.correctedFramePositions();
+    if (correctedPositions.size() != results.size()) {
+        throw std::logic_error(
+            "SLAM corrected trajectory size does not match processed frames");
+    }
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        results[i].position = correctedPositions[i];
+    }
 
     const EnergyMeasurement energy = energyMeter.finish();
     const double wallSeconds =
@@ -805,6 +818,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     summary.controllerEnterThreshold = enterRecoveryBelow;
     summary.controllerExitThreshold = exitRecoveryAbove;
     summary.modeTransitions = transitions;
+    summary.loopClosures = slam.loopClosures();
+    summary.maxLoopDriftEstimateUnits =
+        slam.maxLoopDriftEstimateUnits();
 
     std::vector<double> latencies;
     std::size_t recoveryFrames = 0;
@@ -927,7 +943,9 @@ void writeSummaries(const std::filesystem::path& outputPath,
               "rss_after_bytes,peak_rss_bytes,energy_joules,energy_method,"
               "energy_scope,energy_status,recovery_mode_fraction,"
               "mode_transitions,controller_enter_threshold,"
-              "controller_exit_threshold,monocular_scale\n"
+              "controller_exit_threshold,loop_closures,"
+              "max_loop_drift_before_optimization_estimate_units,"
+              "monocular_scale\n"
            << std::setprecision(10);
     for (const RunSummary& summary : summaries) {
         output << summary.sequence << ',' << summary.configuration << ','
@@ -953,7 +971,8 @@ void writeSummaries(const std::filesystem::path& outputPath,
                << summary.recoveryFraction << ','
                << summary.modeTransitions
         << ',' << summary.controllerEnterThreshold << ','
-        << summary.controllerExitThreshold
+        << summary.controllerExitThreshold << ',' << summary.loopClosures
+        << ',' << summary.maxLoopDriftEstimateUnits
                << ",unknown_similarity_aligned\n";
     }
 }

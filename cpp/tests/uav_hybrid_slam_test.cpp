@@ -114,6 +114,29 @@ int main() {
     CHECK(slam.totalEnergyJoules() > 0.0);
     CHECK(slam.trajectory().size() >= 4);
 
+    // Repeated visual and LiDAR observations at the same place must be
+    // recognized and confirmed by scan geometry before graph optimization.
+    UAVHybridSLAM loopSlam(cam);
+    cv::Mat loopImage(240, 320, CV_8UC1);
+    cv::RNG loopRng(7);
+    loopRng.fill(loopImage, cv::RNG::UNIFORM, 0, 256);
+    LidarScan loopScan;
+    for (int i = 0; i < 120; ++i) {
+        const float x = static_cast<float>(loopRng.uniform(-2.0, 2.0));
+        const float y = static_cast<float>(loopRng.uniform(1.0, 5.0));
+        const float z = static_cast<float>(loopRng.uniform(0.5, 3.0));
+        loopScan.points.push_back({x, y, z, 50.0f});
+    }
+    bool detectedLoop = false;
+    for (int i = 0; i < 151; ++i) {
+        loopScan.timestampNs = 3000000000LL + i * 20000000LL;
+        const UAVState loopState = loopSlam.processFrame(
+            loopImage, loopScan.timestampNs, loopScan);
+        detectedLoop = detectedLoop || loopState.loopClosed;
+    }
+    CHECK(detectedLoop);
+    CHECK(loopSlam.loopClosures() > 0);
+
     std::cout << "All UAV Hybrid SLAM & Illumination Shock tests PASSED successfully!\n";
     return 0;
 }

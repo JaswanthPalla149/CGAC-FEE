@@ -21,7 +21,7 @@ def create_trajectory_parameters(
 
     rng = np.random.default_rng(actual_seed)
     if closed_loop:
-        omega = 2.0 * math.pi / max(1, total_frames)
+        omega = 2.0 * math.pi / max(1, total_frames - 1)
         parameters = {
             "closed_loop": 1.0,
             "total_frames": float(total_frames),

@@ -10,6 +10,7 @@
 #include <limits>
 #include <iomanip>
 #include <iostream>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -602,11 +603,82 @@ int main(int argc, char** argv) {
             std::cout << "\n[EcoLIVO Simulation] Saved RViz visualizer snapshot to: "
                       << std::filesystem::absolute(snapshotPath).string() << "\n";
 
+            const auto loopReportPath = outputPath / "uav_loop_closures.csv";
+            std::ofstream loopReport(loopReportPath);
+            if (!loopReport) {
+                throw std::runtime_error("cannot write " +
+                                         loopReportPath.string());
+            }
+            loopReport
+                << "# Place recognition: binary descriptors with ratio test and "
+                   "150-frame temporal exclusion.\n"
+                << "# Geometric verification: one-to-one scan-to-scan ICP; at "
+                   "least 30 correspondences, at least 60% scan coverage, "
+                   "ICP RMS and ordered-ray RMS <= 0.12 m.\n"
+                << "# Drift is the pre-optimization relative-translation "
+                   "discrepancy measured in meters.\n"
+                << "frame_index,timestamp_ns,candidate_frame,"
+                   "loop_drift_before_optimization_m\n"
+                << std::setprecision(10);
+            const auto& uavTrajectory = hybridSlam.trajectory();
+            for (std::size_t frameIndex = 0;
+                 frameIndex < uavTrajectory.size(); ++frameIndex) {
+                const auto& state = uavTrajectory[frameIndex];
+                if (state.loopClosed) {
+                    loopReport << frameIndex << ',' << state.timestampNs << ','
+                               << state.loopCandidateFrame << ','
+                               << state.loopDriftMeters << '\n';
+                }
+            }
+            loopReport.close();
+            if (!loopReport) {
+                throw std::runtime_error("failed writing " +
+                                         loopReportPath.string());
+            }
+
+            const auto trajectoryReportPath = outputPath / "uav_trajectory.csv";
+            std::ofstream trajectoryReport(trajectoryReportPath);
+            if (!trajectoryReport) {
+                throw std::runtime_error("cannot write " +
+                                         trajectoryReportPath.string());
+            }
+            trajectoryReport
+                << "# Position is the estimated world-frame pose in meters.\n"
+                << "# Loop drift is the pre-optimization ICP relative-translation "
+                   "discrepancy in meters; -1 candidate means no closure.\n"
+                << "frame_index,timestamp_ns,x_m,y_m,z_m,confidence,mode,"
+                   "loop_closed,candidate_frame,loop_drift_before_optimization_m\n"
+                << std::setprecision(10);
+            for (std::size_t frameIndex = 0;
+                 frameIndex < uavTrajectory.size(); ++frameIndex) {
+                const auto& state = uavTrajectory[frameIndex];
+                trajectoryReport
+                    << frameIndex << ',' << state.timestampNs << ','
+                    << state.positionWorld[0] << ',' << state.positionWorld[1]
+                    << ',' << state.positionWorld[2] << ',' << state.confidence
+                    << ',' << adaptive_slam::hybridModeName(state.mode) << ','
+                    << (state.loopClosed ? 1 : 0) << ','
+                    << state.loopCandidateFrame << ',' << state.loopDriftMeters
+                    << '\n';
+            }
+            trajectoryReport.close();
+            if (!trajectoryReport) {
+                throw std::runtime_error("failed writing " +
+                                         trajectoryReportPath.string());
+            }
+
             std::cout << "UAV Hybrid SLAM Completed:\n"
                       << "  Total Frames Processed   : " << sequence.frames.size() << '\n'
                       << "  Nominal Low-Cost Frames  : " << lowCostFrames << '\n'
                       << "  Integer CLAHE Recovery   : " << recoveryFrames << '\n'
                       << "  Visual Bypass (0 MACs)   : " << bypassFrames << '\n'
+                      << "  Verified Loop Closures   : " << hybridSlam.loopClosures() << '\n'
+                      << "  Max Pre-optimization Loop Drift: "
+                      << hybridSlam.maxLoopDriftMeters() << " m\n"
+                      << "  Loop Report              : "
+                      << std::filesystem::absolute(loopReportPath).string() << '\n'
+                      << "  Trajectory Report        : "
+                      << std::filesystem::absolute(trajectoryReportPath).string() << '\n'
                       << "  Total MAC Operations     : " << hybridSlam.totalMacOperations() << '\n'
                       << "  Total Model Energy (not measured): " << std::fixed << std::setprecision(3)
                       << hybridSlam.totalEnergyJoules() << " Joules\n"

@@ -164,6 +164,8 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
         firstKf.landmarkIds = previousLandmarkIds_;
         firstKf.descriptors = computeBriefDescriptors(currentImage, firstKf.points);
         keyframes_.push_back(firstKf);
+        framePoseHistory_.push_back(positionWorld_);
+        frameAnchorKeyframes_.push_back(0);
         result.position = positionWorld_;
         result.trackingSucceeded = true;
         result.confidence = 1.0;
@@ -289,16 +291,28 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     previousPoints_.swap(nextPoints);
     previousLandmarkIds_.swap(nextIds);
     ++frameIndex_;
+    std::size_t poseAnchorKeyframe = keyframes_.size() - 1;
     if (frameIndex_ % keyframeInterval_ == 0) {
         Keyframe kf(timestampNs, rotationWorldCamera_, positionWorld_, keyframes_.size());
         kf.points = previousPoints_;
         kf.landmarkIds = previousLandmarkIds_;
         kf.descriptors = computeBriefDescriptors(currentImage, kf.points);
+        const PoseGraphPose previousKeyframePose{
+            keyframes_.back().rotationWorldCamera,
+            keyframes_.back().positionWorld};
+        const PoseGraphPose currentKeyframePose{
+            kf.rotationWorldCamera, kf.positionWorld};
+        poseGraphConstraints_.push_back(makePoseGraphConstraint(
+            keyframes_.size() - 1, keyframes_.size(), previousKeyframePose,
+            currentKeyframePose, 25.0, 100.0));
         detectAndCloseLoop(kf, result);
         keyframes_.push_back(kf);
+        poseAnchorKeyframe = keyframes_.size() - 1;
     }
 
     result.position = positionWorld_;
+    framePoseHistory_.push_back(positionWorld_);
+    frameAnchorKeyframes_.push_back(poseAnchorKeyframe);
     result.confidence = confidenceScore(result.trackedRatio, inlierRatio,
                                         reprojectionError);
     result.inlierRatio = inlierRatio;
@@ -578,25 +592,27 @@ void FeatureSLAM::triangulateNewLandmarks(
         }
         landmarkIds[originalIndices[i]] = static_cast<int>(landmarks_.size());
         landmarks_.emplace_back(point[0], point[1], point[2]);
+        landmarkAnchorKeyframes_.push_back(keyframes_.size() - 1);
     }
 }
 
 bool FeatureSLAM::detectAndCloseLoop(Keyframe& currentKf, FrameResult& result) {
-    if (keyframes_.size() < 6 || currentKf.descriptors.empty()) {
+    if (keyframes_.size() < 6 || currentKf.descriptors.empty() ||
+        (hasLastLoopClosure_ &&
+         keyframes_.size() < lastLoopClosureKeyframe_ + 2)) {
         return false;
     }
 
-    const std::size_t maxCandidateIndex = keyframes_.size() - 4;
-
-    int bestCandidateIdx = -1;
-    int bestMatchCount = 0;
-    std::vector<std::pair<int, int>> bestMatches;
-
-    for (std::size_t j = 0; j <= maxCandidateIndex; ++j) {
+    std::vector<std::pair<std::size_t, std::vector<std::pair<int, int>>>>
+        candidates;
+    for (std::size_t j = 0; j + 14 < keyframes_.size(); ++j) {
         const auto& candKf = keyframes_[j];
-        if (candKf.descriptors.empty()) continue;
+        if (candKf.descriptors.empty()) {
+            continue;
+        }
 
         std::vector<std::pair<int, int>> matches;
+        std::vector<bool> usedCandidateDescriptor(candKf.descriptors.size(), false);
         for (std::size_t c = 0; c < currentKf.descriptors.size(); ++c) {
             const auto& descC = currentKf.descriptors[c];
             std::uint16_t bestDist = 257;
@@ -615,140 +631,217 @@ bool FeatureSLAM::detectAndCloseLoop(Keyframe& currentKf, FrameResult& result) {
             }
 
             if (bestDist <= 52 && bestK >= 0 &&
-                (secondDist == 0 || (static_cast<float>(bestDist) / static_cast<float>(secondDist) < 0.85f))) {
+                !usedCandidateDescriptor[static_cast<std::size_t>(bestK)] &&
+                (secondDist == 0
+                     ? bestDist == 0
+                     : static_cast<float>(bestDist) /
+                               static_cast<float>(secondDist) <
+                           0.85F)) {
                 matches.push_back({static_cast<int>(c), bestK});
+                usedCandidateDescriptor[static_cast<std::size_t>(bestK)] = true;
             }
         }
 
-        if (static_cast<int>(matches.size()) > bestMatchCount) {
-            bestMatchCount = static_cast<int>(matches.size());
-            bestCandidateIdx = static_cast<int>(j);
-            bestMatches = std::move(matches);
+        if (matches.size() >= 15) {
+            candidates.emplace_back(j, std::move(matches));
         }
     }
 
-    if (bestMatchCount < 15 || bestCandidateIdx < 0) {
+    std::sort(candidates.begin(), candidates.end(),
+              [](const auto& first, const auto& second) {
+                  return first.second.size() > second.second.size();
+              });
+    if (candidates.empty()) {
         return false;
     }
 
-    const auto& candKf = keyframes_[static_cast<std::size_t>(bestCandidateIdx)];
-
-    // Geometric Verification
-    std::vector<cv::Point3f> worldPoints;
-    std::vector<cv::Point2f> currPoints;
-    std::vector<cv::Point2f> candPoints;
-    worldPoints.reserve(bestMatches.size());
-    currPoints.reserve(bestMatches.size());
-    candPoints.reserve(bestMatches.size());
-
-    for (const auto& m : bestMatches) {
-        const int candLmId = candKf.landmarkIds[m.second];
-        if (candLmId >= 0 && static_cast<std::size_t>(candLmId) < landmarks_.size()) {
-            const auto& lm = landmarks_[candLmId];
-            worldPoints.emplace_back(static_cast<float>(lm.x),
-                                     static_cast<float>(lm.y),
-                                     static_cast<float>(lm.z));
-            currPoints.push_back(currentKf.points[m.first]);
+    std::size_t verifiedCandidate = 0;
+    std::size_t verifiedInliers = 0;
+    cv::Matx33d measuredRotation = rotationWorldCamera_;
+    cv::Vec3d measuredPosition = positionWorld_;
+    for (const auto& candidate : candidates) {
+        const auto& candKf = keyframes_[candidate.first];
+        std::vector<cv::Point3f> worldPoints;
+        std::vector<cv::Point2f> currentPoints;
+        std::vector<bool> usedLandmark(landmarks_.size(), false);
+        for (const auto& match : candidate.second) {
+            if (match.first < 0 ||
+                static_cast<std::size_t>(match.first) >= currentKf.points.size() ||
+                match.second < 0 ||
+                static_cast<std::size_t>(match.second) >= candKf.landmarkIds.size()) {
+                continue;
+            }
+            const int landmarkId =
+                candKf.landmarkIds[static_cast<std::size_t>(match.second)];
+            if (landmarkId < 0 ||
+                static_cast<std::size_t>(landmarkId) >= landmarks_.size() ||
+                usedLandmark[static_cast<std::size_t>(landmarkId)]) {
+                continue;
+            }
+            usedLandmark[static_cast<std::size_t>(landmarkId)] = true;
+            const auto& landmark = landmarks_[static_cast<std::size_t>(landmarkId)];
+            worldPoints.emplace_back(static_cast<float>(landmark.x),
+                                     static_cast<float>(landmark.y),
+                                     static_cast<float>(landmark.z));
+            currentPoints.push_back(
+                currentKf.points[static_cast<std::size_t>(match.first)]);
         }
-        candPoints.push_back(candKf.points[m.second]);
-    }
+        if (worldPoints.size() < 20) {
+            continue;
+        }
 
-    bool loopVerified = false;
-    cv::Matx33d R_meas = rotationWorldCamera_;
-    cv::Vec3d t_meas = positionWorld_;
-
-    // 1. 3D-to-2D PnP RANSAC
-    if (worldPoints.size() >= 10) {
-        cv::Mat rvec, tvec;
+        cv::Mat rvec;
+        cv::Mat tvec;
         std::vector<int> inliers;
         const bool pnpOk = cv::solvePnPRansac(
-            worldPoints, currPoints, cameraMatrix(camera_), cv::noArray(),
+            worldPoints, currentPoints, cameraMatrix(camera_), cv::noArray(),
             rvec, tvec, false, 150, 4.0F, 0.99, inliers, cv::SOLVEPNP_EPNP);
-
-        if (pnpOk && inliers.size() >= 8) {
-            cv::Mat R_mat;
-            cv::Rodrigues(rvec, R_mat);
-            cv::Matx33d camWorld;
-            for (int r = 0; r < 3; ++r) {
-                for (int c = 0; c < 3; ++c) {
-                    camWorld(r, c) = R_mat.at<double>(r, c);
-                }
-            }
-            R_meas = camWorld.t();
-            t_meas = -(R_meas * cv::Vec3d(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2)));
-            loopVerified = true;
+        if (!pnpOk || inliers.size() < 12 ||
+            static_cast<double>(inliers.size()) /
+                    static_cast<double>(worldPoints.size()) <
+                0.50) {
+            continue;
         }
+
+        std::vector<cv::Point2f> projectedInliers;
+        std::vector<cv::Point3f> inlierWorldPoints;
+        std::vector<cv::Point2f> inlierImagePoints;
+        inlierWorldPoints.reserve(inliers.size());
+        inlierImagePoints.reserve(inliers.size());
+        for (const int inlier : inliers) {
+            inlierWorldPoints.push_back(worldPoints[static_cast<std::size_t>(inlier)]);
+            inlierImagePoints.push_back(currentPoints[static_cast<std::size_t>(inlier)]);
+        }
+        cv::projectPoints(inlierWorldPoints, rvec, tvec, cameraMatrix(camera_),
+                          cv::noArray(), projectedInliers);
+        std::vector<double> reprojectionErrors;
+        reprojectionErrors.reserve(inliers.size());
+        for (std::size_t index = 0; index < inliers.size(); ++index) {
+            reprojectionErrors.push_back(
+                cv::norm(projectedInliers[index] - inlierImagePoints[index]));
+        }
+        const auto medianError = reprojectionErrors.begin() +
+                                 static_cast<std::ptrdiff_t>(
+                                     reprojectionErrors.size() / 2);
+        std::nth_element(reprojectionErrors.begin(), medianError,
+                         reprojectionErrors.end());
+        if (*medianError > 2.5) {
+            continue;
+        }
+
+        cv::Mat rotationMatrix;
+        cv::Rodrigues(rvec, rotationMatrix);
+        cv::Matx33d cameraFromWorld;
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                cameraFromWorld(row, column) =
+                    rotationMatrix.at<double>(row, column);
+            }
+        }
+        const cv::Matx33d worldFromCamera = cameraFromWorld.t();
+        const cv::Vec3d cameraTranslation(tvec.at<double>(0),
+                                          tvec.at<double>(1),
+                                          tvec.at<double>(2));
+        verifiedCandidate = candidate.first;
+        verifiedInliers = inliers.size();
+        measuredRotation = worldFromCamera;
+        measuredPosition = -(worldFromCamera * cameraTranslation);
+        break;
     }
 
-    // 2. 2D-to-2D Essential Matrix Geometric Verification Fallback
-    if (!loopVerified && bestMatches.size() >= 15) {
-        std::vector<cv::Point2f> p1, p2;
-        p1.reserve(bestMatches.size());
-        p2.reserve(bestMatches.size());
-        for (const auto& m : bestMatches) {
-            p1.push_back(candKf.points[m.second]);
-            p2.push_back(currentKf.points[m.first]);
-        }
-        cv::Mat mask;
-        cv::Mat E = cv::findEssentialMat(p1, p2, cameraMatrix(camera_), cv::RANSAC, 0.999, 1.5, mask);
-        if (!E.empty() && E.rows >= 3) {
-            cv::Mat R_rel, t_rel;
-            int essInliers = cv::recoverPose(E, p1, p2, cameraMatrix(camera_), R_rel, t_rel, mask);
-            if (essInliers >= 12) {
-                cv::Matx33d dR;
-                for (int r = 0; r < 3; ++r) {
-                    for (int c = 0; c < 3; ++c) {
-                        dR(r, c) = R_rel.at<double>(r, c);
-                    }
-                }
-                R_meas = candKf.rotationWorldCamera * dR.t();
-                t_meas = candKf.positionWorld;
-                loopVerified = true;
-            }
-        }
-    }
-
-    if (!loopVerified) {
+    if (verifiedInliers == 0) {
         return false;
     }
 
-    // Pose Graph Drift Correction & Distribution across the Loop
-    const cv::Vec3d deltaP = positionWorld_ - t_meas;
-    const double driftMeters = cv::norm(deltaP);
+    const std::size_t currentNode = keyframes_.size();
+    std::vector<PoseGraphPose> poses;
+    poses.reserve(currentNode + 1);
+    for (const auto& keyframe : keyframes_) {
+        poses.push_back(
+            {keyframe.rotationWorldCamera, keyframe.positionWorld});
+    }
+    poses.push_back({currentKf.rotationWorldCamera, currentKf.positionWorld});
+    const double driftEstimateUnits = cv::norm(positionWorld_ - measuredPosition);
+    const PoseGraphPose measuredCurrentPose{measuredRotation, measuredPosition};
+    poseGraphConstraints_.push_back(makePoseGraphConstraint(
+        verifiedCandidate, currentNode, poses[verifiedCandidate],
+        measuredCurrentPose, 100.0, 100.0, true));
 
-    if (driftMeters > 0.005 && driftMeters < 8.0) {
-        const std::size_t loopStart = static_cast<std::size_t>(bestCandidateIdx);
-        const std::size_t loopEnd = keyframes_.size();
-        const double span = static_cast<double>(std::max<std::size_t>(1, loopEnd - loopStart));
-
-        for (std::size_t k = loopStart; k < keyframes_.size(); ++k) {
-            const double w = static_cast<double>(k - loopStart) / span;
-            keyframes_[k].positionWorld -= deltaP * w;
-            for (int lmId : keyframes_[k].landmarkIds) {
-                if (lmId >= 0 && static_cast<std::size_t>(lmId) < landmarks_.size()) {
-                    landmarks_[lmId].x -= deltaP[0] * w;
-                    landmarks_[lmId].y -= deltaP[1] * w;
-                    landmarks_[lmId].z -= deltaP[2] * w;
-                }
-            }
-        }
-
-        positionWorld_ = t_meas;
-        rotationWorldCamera_ = R_meas;
-        currentKf.positionWorld = t_meas;
-        currentKf.rotationWorldCamera = R_meas;
-
-        result.loopClosed = true;
-        result.loopCandidateId = bestCandidateIdx;
-        result.loopDriftMeters = driftMeters;
-        result.position = positionWorld_;
-
-        ++loopClosures_;
-        maxLoopDriftMeters_ = std::max(maxLoopDriftMeters_, driftMeters);
-        return true;
+    if (!optimizePoseGraph(poses, poseGraphConstraints_)) {
+        poseGraphConstraints_.pop_back();
+        throw std::runtime_error(
+            "pose-graph optimization failed after verified visual loop closure");
     }
 
-    return false;
+    const std::vector<PoseGraphPose> previousPoses = [&]() {
+        std::vector<PoseGraphPose> prior;
+        prior.reserve(currentNode + 1);
+        for (const auto& keyframe : keyframes_) {
+            prior.push_back(
+                {keyframe.rotationWorldCamera, keyframe.positionWorld});
+        }
+        prior.push_back({currentKf.rotationWorldCamera, currentKf.positionWorld});
+        return prior;
+    }();
+
+    for (std::size_t index = 0; index < keyframes_.size(); ++index) {
+        keyframes_[index].rotationWorldCamera =
+            poses[index].rotationWorldFromBody;
+        keyframes_[index].positionWorld = poses[index].positionWorld;
+    }
+    currentKf.rotationWorldCamera = poses.back().rotationWorldFromBody;
+    currentKf.positionWorld = poses.back().positionWorld;
+
+    for (std::size_t index = 0; index < landmarks_.size(); ++index) {
+        if (index >= landmarkAnchorKeyframes_.size()) {
+            break;
+        }
+        const std::size_t anchor = landmarkAnchorKeyframes_[index];
+        if (anchor >= poses.size()) {
+            continue;
+        }
+        const cv::Vec3d oldPoint(landmarks_[index].x, landmarks_[index].y,
+                                 landmarks_[index].z);
+        const cv::Vec3d localPoint =
+            previousPoses[anchor].rotationWorldFromBody.t() *
+            (oldPoint - previousPoses[anchor].positionWorld);
+        const cv::Vec3d correctedPoint =
+            poses[anchor].rotationWorldFromBody * localPoint +
+            poses[anchor].positionWorld;
+        landmarks_[index] =
+            cv::Point3d(correctedPoint[0], correctedPoint[1], correctedPoint[2]);
+    }
+
+    for (std::size_t index = 0; index < framePoseHistory_.size(); ++index) {
+        if (index >= frameAnchorKeyframes_.size()) {
+            break;
+        }
+        const std::size_t anchor = frameAnchorKeyframes_[index];
+        if (anchor >= poses.size()) {
+            continue;
+        }
+        const cv::Vec3d localPoint =
+            previousPoses[anchor].rotationWorldFromBody.t() *
+            (framePoseHistory_[index] -
+             previousPoses[anchor].positionWorld);
+        framePoseHistory_[index] =
+            poses[anchor].rotationWorldFromBody * localPoint +
+            poses[anchor].positionWorld;
+    }
+
+    positionWorld_ = poses.back().positionWorld;
+    rotationWorldCamera_ = poses.back().rotationWorldFromBody;
+    result.loopClosed = true;
+    result.loopCandidateId = static_cast<int>(verifiedCandidate);
+    result.loopDriftEstimateUnits = driftEstimateUnits;
+    result.position = positionWorld_;
+    ++loopClosures_;
+    maxLoopDriftEstimateUnits_ =
+        std::max(maxLoopDriftEstimateUnits_, driftEstimateUnits);
+    lastLoopClosureKeyframe_ = currentNode;
+    hasLastLoopClosure_ = true;
+
+    return true;
 }
 
 double FeatureSLAM::confidenceScore(double trackedRatio, double inlierRatio,

@@ -11,6 +11,7 @@ add_library(adaptive_slam
     src/controller_cpp.cpp
     src/slam.cpp
     src/evaluation.cpp
+    src/pose_graph.cpp
     src/uav_hybrid_slam.cpp
 )
 target_include_directories(adaptive_slam PUBLIC include)
@@ -46,4 +47,8 @@ if(BUILD_TESTING)
     add_executable(imu_rotation_test tests/imu_rotation_test.cpp)
     target_link_libraries(imu_rotation_test PRIVATE adaptive_slam)
     add_test(NAME imu_rotation_test COMMAND imu_rotation_test)
+
+    add_executable(pose_graph_test tests/pose_graph_test.cpp)
+    target_link_libraries(pose_graph_test PRIVATE adaptive_slam)
+    add_test(NAME pose_graph_test COMMAND pose_graph_test)
 endif()

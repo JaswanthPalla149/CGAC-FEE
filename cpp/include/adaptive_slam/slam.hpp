@@ -2,6 +2,7 @@
 
 #include "adaptive_slam/controller.h"
 #include "adaptive_slam/hbst_matcher.hpp"
+#include "adaptive_slam/pose_graph.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -57,7 +58,7 @@ struct FrameResult {
     bool trackingSucceeded{};
     bool loopClosed{false};
     int loopCandidateId{-1};
-    double loopDriftMeters{0.0};
+    double loopDriftEstimateUnits{0.0};
 };
 
 struct Keyframe {
@@ -86,7 +87,12 @@ public:
     const std::vector<cv::Point3d>& landmarks() const noexcept;
     const std::vector<Keyframe>& keyframes() const noexcept;
     std::size_t loopClosures() const noexcept { return loopClosures_; }
-    double maxLoopDriftMeters() const noexcept { return maxLoopDriftMeters_; }
+    double maxLoopDriftEstimateUnits() const noexcept {
+        return maxLoopDriftEstimateUnits_;
+    }
+    const std::vector<cv::Vec3d>& correctedFramePositions() const noexcept {
+        return framePoseHistory_;
+    }
 
 private:
     struct PoseEstimate {
@@ -127,10 +133,16 @@ private:
     cv::Matx33d rotationWorldCamera_{cv::Matx33d::eye()};
     cv::Vec3d positionWorld_{0.0, 0.0, 0.0};
     std::vector<cv::Point3d> landmarks_;
+    std::vector<std::size_t> landmarkAnchorKeyframes_;
     std::vector<Keyframe> keyframes_;
+    std::vector<PoseGraphConstraint> poseGraphConstraints_;
+    std::vector<cv::Vec3d> framePoseHistory_;
+    std::vector<std::size_t> frameAnchorKeyframes_;
     int frameIndex_{};
     std::size_t loopClosures_{0};
-    double maxLoopDriftMeters_{0.0};
+    double maxLoopDriftEstimateUnits_{0.0};
+    std::size_t lastLoopClosureKeyframe_{};
+    bool hasLastLoopClosure_{false};
 };
 
 struct EuRoCFrame {
@@ -196,7 +208,7 @@ struct RunSummary {
     double recoveryFraction{};
     std::size_t modeTransitions{};
     std::size_t loopClosures{};
-    double maxLoopDriftMeters{};
+    double maxLoopDriftEstimateUnits{};
 };
 
 RunSummary runConfiguration(const std::filesystem::path& sequencePath,

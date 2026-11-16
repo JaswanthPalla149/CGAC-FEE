@@ -66,13 +66,14 @@ python scripts\download_euroc.py --sequence MH_01_easy --output datasets --force
 ```
 
 For a synthetic test sequence, use `scripts\generate_synthetic_euroc.py` and do
-not include it in a real EuRoC campaign. Each invocation generates a randomized
-trajectory by default, prints its seed, and stores the seed in the replay
+not include it in a real EuRoC campaign. Each invocation generates a randomized,
+closed trajectory by default, prints its seed, and stores the seed in the replay
 manifest. Pass `--seed N` to reproduce a trajectory; use a different `--output`
-directory to keep multiple generated sequences. The batch runner accepts only
-full sequences with at least 1000 frames and IMU/ground-truth streams. It runs
-each selected degradation across all three configurations and writes per-sequence
-outputs, a combined summary, and a campaign manifest:
+directory to keep multiple generated sequences. `--open-loop` opts out of the
+closed path. The batch runner accepts only full sequences with at least 1000
+frames and IMU/ground-truth streams. It runs each selected degradation across
+all three configurations and writes per-sequence outputs, a combined summary,
+and a campaign manifest:
 
 ```powershell
 python scripts\download_euroc.py --sequence MH_03_medium --output datasets --force-download
@@ -102,7 +103,9 @@ and running it on the same local sequences and machine.
 
 The native implementation uses OpenCV's optimized kernels, reuses the CLAHE operator, caches the previous prepared image when the processing mode is unchanged, and defaults to one OpenCV thread for repeatable comparisons. A mode change requires preparing the prior frame in the new mode.
 
-This is a research baseline, not an ORB-SLAM3 equivalent. Monocular translation scale is arbitrary. Gyro is used only as a rotation prior; this is not full visual-inertial odometry. There is no loop closure, relocalization after tracking loss, bundle adjustment, place recognition, or stereo/inertial fusion. The map is incrementally triangulated and is not globally optimized, so drift and bad map points can accumulate.
+This is a research baseline, not an ORB-SLAM3 equivalent. It now includes prototype loop closure in both pipelines: `FeatureSLAM` uses BRIEF place recognition and PnP-RANSAC verification; `UAVHybridSLAM` uses binary-descriptor recognition and one-to-one scan-to-scan ICP plus ordered-ray consistency checks. Both enforce a 150-frame/keyframe temporal exclusion. Accepted constraints are optimized in a native OpenCV-only 6-DoF relative-pose graph with a fixed first pose. The feature map is corrected by rigidly transforming landmarks from their anchor keyframes; this is not bundle adjustment. The UAV ordered-ray check relies on the deterministic synthetic raycaster and is not yet a physical-sensor loop-closure model. Monocular translation scale remains arbitrary, and gyro is used only as a rotation prior rather than full visual-inertial odometry. Relocalization after tracking loss and stereo/inertial fusion are not implemented, so drift and bad map points can still accumulate.
+
+The benchmark `*_frames.csv` files record `loop_closed`, the accepted candidate keyframe, and pre-optimization drift in **monocular estimate units** (not meters). `summary.csv` reports the number of verified closures and maximum pre-optimization drift. For the UAV demo, `uav_loop_closures.csv` contains one row per accepted closure, with comments describing the descriptor/ICP checks; its drift is a metric relative-translation discrepancy in meters. `uav_trajectory.csv` stores the estimated per-frame positions and closure events. The synthetic generator closes the first and final poses by default (`--open-loop` disables this); a closed route is still not proof of loop detection. Check the recorded closure events and inspect the saved trajectory/map.
 
 ATE and RPE use timestamp-interpolated ground truth and per-run similarity alignment; these are not metric-scale errors and can hide monocular scale drift. Blur, low-light, and seeded additive-noise conditions are synthetic approximations, not calibrated camera or environment models. The available synthetic sequence has limited scene/motion diversity. Repeat timing and package-energy trials, keep the same machine conditions, and report the shared CPU-package scope when presenting results.
 

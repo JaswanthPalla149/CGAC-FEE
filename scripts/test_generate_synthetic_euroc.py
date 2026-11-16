@@ -74,6 +74,16 @@ class SyntheticTrajectoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "seed must be non-negative"):
             synthetic.create_trajectory_parameters(-1)
 
+    def test_closed_trajectory_returns_to_start(self):
+        for frame_count in (1, 2, 60, 300):
+            _, parameters = synthetic.create_trajectory_parameters(
+                seed=42, closed_loop=True, total_frames=frame_count
+            )
+            start = synthetic.trajectory_position(0, parameters)
+            end = synthetic.trajectory_position(frame_count - 1, parameters)
+            for start_coordinate, end_coordinate in zip(start, end):
+                self.assertAlmostEqual(start_coordinate, end_coordinate, places=12)
+
 
 if __name__ == "__main__":
     unittest.main()

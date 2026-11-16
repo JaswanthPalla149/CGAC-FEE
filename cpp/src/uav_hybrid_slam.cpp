@@ -85,10 +85,18 @@ void UAVHybridSLAM::reset(const cv::Vec3d& initialPosition) {
     previousRawImage_.release();
     globalLidarMap_.clear();
     currentScanWorld_.clear();
+    mapPointFrameIndices_.clear();
+    metricLandmarkFrameIndices_.clear();
+    poseGraphPoses_.clear();
+    loopRecognitionKeyframes_.clear();
     lastImuTimestampNs_ = 0;
     hasImuTimestamp_ = false;
     totalMacs_ = 0;
     totalJoules_ = 0.0;
+    loopClosures_ = 0;
+    maxLoopDriftMeters_ = 0.0;
+    lastLoopClosureFrame_ = 0;
+    hasLastLoopClosure_ = false;
 }
 
 void UAVHybridSLAM::processImu(const ImuMeasurement& imu) {
@@ -181,6 +189,7 @@ void UAVHybridSLAM::updateLidarPoints(const LidarScan& scan, HybridPowerMode mod
                 cv::Vec3d pBody(pt.x, pt.y, pt.z);
                 cv::Vec3d pWorld = state_.positionWorld + state_.rotationWorldBody * pBody;
                 metricLandmarks_.emplace_back(pWorld[0], pWorld[1], pWorld[2]);
+                metricLandmarkFrameIndices_.push_back(trajectory_.size());
             }
         }
     }
@@ -203,6 +212,7 @@ void UAVHybridSLAM::updateMap(const LidarScan& scan, const cv::Matx33d& R, const
 
     if (globalLidarMap_.empty()) {
         globalLidarMap_ = currentScanWorld_;
+        mapPointFrameIndices_.assign(globalLidarMap_.size(), trajectory_.size());
         return;
     }
 
@@ -222,6 +232,7 @@ void UAVHybridSLAM::updateMap(const LidarScan& scan, const cv::Matx33d& R, const
         }
         if (!duplicate && globalLidarMap_.size() < 12000) {
             globalLidarMap_.push_back(wpt);
+            mapPointFrameIndices_.push_back(trajectory_.size());
         }
     }
 }
@@ -349,11 +360,352 @@ bool UAVHybridSLAM::alignLidarScan(const LidarScan& scan,
     return (inliers >= 8);
 }
 
+bool UAVHybridSLAM::detectAndCloseLoop(
+    std::size_t frameIndex,
+    const std::vector<BinaryDescriptor>& descriptors,
+    const LidarScan& scan) {
+    if (descriptors.size() < 12 || scan.points.size() < 12 ||
+        poseGraphPoses_.size() <= frameIndex ||
+        (hasLastLoopClosure_ && frameIndex < lastLoopClosureFrame_ + 10)) {
+        return false;
+    }
+
+    const LoopRecognitionKeyframe* bestCandidate = nullptr;
+    std::size_t bestMatchCount = 0;
+    for (const auto& candidate : loopRecognitionKeyframes_) {
+        if (frameIndex < candidate.frameIndex + 150 ||
+            candidate.descriptors.empty() ||
+            candidate.lidarPointsBody.size() < 12) {
+            continue;
+        }
+        std::vector<bool> usedCandidate(candidate.descriptors.size(), false);
+        std::size_t matches = 0;
+        for (const auto& query : descriptors) {
+            std::uint16_t bestDistance = 257;
+            std::uint16_t secondDistance = 257;
+            std::size_t bestIndex = 0;
+            for (std::size_t index = 0; index < candidate.descriptors.size();
+                 ++index) {
+                const std::uint16_t distance =
+                    query.hammingDistance(candidate.descriptors[index]);
+                if (distance < bestDistance) {
+                    secondDistance = bestDistance;
+                    bestDistance = distance;
+                    bestIndex = index;
+                } else if (distance < secondDistance) {
+                    secondDistance = distance;
+                }
+            }
+            const bool ratioPassed =
+                secondDistance == 0
+                    ? bestDistance == 0
+                    : static_cast<double>(bestDistance) /
+                              static_cast<double>(secondDistance) <
+                          0.85;
+            if (bestDistance <= 52 && ratioPassed &&
+                !usedCandidate[bestIndex]) {
+                usedCandidate[bestIndex] = true;
+                ++matches;
+            }
+        }
+        if (matches > bestMatchCount) {
+            bestMatchCount = matches;
+            bestCandidate = &candidate;
+        }
+    }
+    if (bestCandidate == nullptr || bestMatchCount < 12) {
+        return false;
+    }
+
+    std::vector<cv::Vec3d> sourcePoints;
+    std::vector<cv::Vec3d> targetPoints = bestCandidate->lidarPointsBody;
+    sourcePoints.reserve(scan.points.size());
+    for (const auto& point : scan.points) {
+        const double squaredRange =
+            static_cast<double>(point.x) * point.x +
+            static_cast<double>(point.y) * point.y +
+            static_cast<double>(point.z) * point.z;
+        if (squaredRange > 0.09 && squaredRange < 3600.0) {
+            sourcePoints.emplace_back(point.x, point.y, point.z);
+        }
+    }
+    if (sourcePoints.size() < 12) {
+        return false;
+    }
+    if (sourcePoints.size() != targetPoints.size()) {
+        return false;
+    }
+    double orderedScanSquaredError = 0.0;
+    for (std::size_t index = 0; index < sourcePoints.size(); ++index) {
+        orderedScanSquaredError +=
+            cv::norm(sourcePoints[index] - targetPoints[index],
+                     cv::NORM_L2SQR);
+    }
+    const double orderedScanRms =
+        std::sqrt(orderedScanSquaredError /
+                  static_cast<double>(sourcePoints.size()));
+    if (orderedScanRms > 0.12) {
+        return false;
+    }
+
+    const PoseGraphPose& candidatePose =
+        poseGraphPoses_[bestCandidate->frameIndex];
+    const PoseGraphPose& currentPose = poseGraphPoses_[frameIndex];
+    cv::Matx33d relativeRotation = cv::Matx33d::eye();
+    cv::Vec3d relativeTranslation(0.0, 0.0, 0.0);
+    std::vector<std::pair<cv::Vec3d, cv::Vec3d>> correspondences;
+    for (int iteration = 0; iteration < 8; ++iteration) {
+        correspondences.clear();
+        std::vector<bool> usedTargets(targetPoints.size(), false);
+        for (const auto& source : sourcePoints) {
+            const cv::Vec3d transformed =
+                relativeRotation * source + relativeTranslation;
+            double bestSquaredDistance = 0.8 * 0.8;
+            std::size_t nearestIndex = targetPoints.size();
+            for (std::size_t targetIndex = 0;
+                 targetIndex < targetPoints.size(); ++targetIndex) {
+                if (usedTargets[targetIndex]) {
+                    continue;
+                }
+                const double squaredDistance = cv::norm(
+                    transformed - targetPoints[targetIndex], cv::NORM_L2SQR);
+                if (squaredDistance < bestSquaredDistance) {
+                    bestSquaredDistance = squaredDistance;
+                    nearestIndex = targetIndex;
+                }
+            }
+            if (nearestIndex < targetPoints.size()) {
+                usedTargets[nearestIndex] = true;
+                correspondences.emplace_back(source, targetPoints[nearestIndex]);
+            }
+        }
+        if (correspondences.size() < 12) {
+            return false;
+        }
+
+        cv::Vec3d sourceCenter(0.0, 0.0, 0.0);
+        cv::Vec3d targetCenter(0.0, 0.0, 0.0);
+        for (const auto& pair : correspondences) {
+            sourceCenter += pair.first;
+            targetCenter += pair.second;
+        }
+        const double inverseCount =
+            1.0 / static_cast<double>(correspondences.size());
+        sourceCenter *= inverseCount;
+        targetCenter *= inverseCount;
+        cv::Mat covariance = cv::Mat::zeros(3, 3, CV_64F);
+        for (const auto& pair : correspondences) {
+            const cv::Vec3d source = pair.first - sourceCenter;
+            const cv::Vec3d target = pair.second - targetCenter;
+            for (int row = 0; row < 3; ++row) {
+                for (int column = 0; column < 3; ++column) {
+                    covariance.at<double>(row, column) +=
+                        source[row] * target[column];
+                }
+            }
+        }
+        cv::SVD svd(covariance, cv::SVD::FULL_UV);
+        cv::Mat rotation = svd.vt.t() * svd.u.t();
+        if (cv::determinant(rotation) < 0.0) {
+            cv::Mat adjustedVt = svd.vt.clone();
+            adjustedVt.row(2) *= -1.0;
+            rotation = adjustedVt.t() * svd.u.t();
+        }
+        for (int row = 0; row < 3; ++row) {
+            for (int column = 0; column < 3; ++column) {
+                relativeRotation(row, column) =
+                    rotation.at<double>(row, column);
+            }
+        }
+        relativeTranslation = targetCenter - relativeRotation * sourceCenter;
+    }
+
+    double squaredError = 0.0;
+    for (const auto& pair : correspondences) {
+        squaredError += cv::norm(
+                            relativeRotation * pair.first +
+                                relativeTranslation - pair.second,
+                            cv::NORM_L2SQR);
+    }
+    const double rmsError =
+        std::sqrt(squaredError / static_cast<double>(correspondences.size()));
+    if (rmsError > 0.12 || correspondences.size() < 30 ||
+        static_cast<double>(correspondences.size()) /
+                static_cast<double>(sourcePoints.size()) <
+            0.60) {
+        return false;
+    }
+
+    const double driftMeters = cv::norm(
+        candidatePose.rotationWorldFromBody.t() *
+            (currentPose.positionWorld - candidatePose.positionWorld) -
+        relativeTranslation);
+
+    std::vector<std::size_t> graphNodeFrames;
+    for (std::size_t nodeFrame = 0; nodeFrame < frameIndex;
+         nodeFrame += 10) {
+        graphNodeFrames.push_back(nodeFrame);
+    }
+    if (graphNodeFrames.empty() || graphNodeFrames.back() != frameIndex) {
+        graphNodeFrames.push_back(frameIndex);
+    }
+    std::vector<PoseGraphPose> previousGraphPoses;
+    previousGraphPoses.reserve(graphNodeFrames.size());
+    for (const std::size_t nodeFrame : graphNodeFrames) {
+        previousGraphPoses.push_back(poseGraphPoses_[nodeFrame]);
+    }
+    std::vector<PoseGraphConstraint> constraints;
+    constraints.reserve(graphNodeFrames.size());
+    for (std::size_t node = 1; node < graphNodeFrames.size(); ++node) {
+        constraints.push_back(makePoseGraphConstraint(
+            node - 1, node, previousGraphPoses[node - 1],
+            previousGraphPoses[node], 25.0, 100.0));
+    }
+    const auto candidateNode = std::find(
+        graphNodeFrames.begin(), graphNodeFrames.end(),
+        bestCandidate->frameIndex);
+    if (candidateNode == graphNodeFrames.end()) {
+        throw std::logic_error(
+            "loop-recognition keyframe is missing from the pose graph");
+    }
+    PoseGraphConstraint loopConstraint;
+    loopConstraint.from = static_cast<std::size_t>(
+        std::distance(graphNodeFrames.begin(), candidateNode));
+    loopConstraint.to = graphNodeFrames.size() - 1;
+    loopConstraint.rotationFromTo = relativeRotation;
+    loopConstraint.translationFromTo = relativeTranslation;
+    loopConstraint.translationInformation = 100.0;
+    loopConstraint.rotationInformation = 100.0;
+    loopConstraint.loopClosure = true;
+    constraints.push_back(loopConstraint);
+
+    std::vector<PoseGraphPose> optimizedGraphPoses = previousGraphPoses;
+    if (!optimizePoseGraph(optimizedGraphPoses, constraints)) {
+        throw std::runtime_error(
+            "pose-graph optimization failed after verified UAV loop closure");
+    }
+    const std::vector<PoseGraphPose> previousFramePoses = poseGraphPoses_;
+    applyPoseGraphCorrection(previousFramePoses, graphNodeFrames,
+                             previousGraphPoses, optimizedGraphPoses);
+    state_.loopClosed = true;
+    state_.loopCandidateFrame =
+        static_cast<int>(bestCandidate->frameIndex);
+    state_.loopDriftMeters = driftMeters;
+    ++loopClosures_;
+    maxLoopDriftMeters_ = std::max(maxLoopDriftMeters_, driftMeters);
+    lastLoopClosureFrame_ = frameIndex;
+    hasLastLoopClosure_ = true;
+    return true;
+}
+
+void UAVHybridSLAM::applyPoseGraphCorrection(
+    const std::vector<PoseGraphPose>& previousFramePoses,
+    const std::vector<std::size_t>& graphNodeFrames,
+    const std::vector<PoseGraphPose>& previousGraphPoses,
+    const std::vector<PoseGraphPose>& optimizedGraphPoses) {
+    const auto graphNodeForFrame = [&graphNodeFrames](std::size_t frameIndex) {
+        const auto nextNode = std::upper_bound(
+            graphNodeFrames.begin(), graphNodeFrames.end(), frameIndex);
+        return nextNode == graphNodeFrames.begin()
+                   ? std::size_t{0}
+                   : static_cast<std::size_t>(
+                         std::distance(graphNodeFrames.begin(), nextNode) - 1);
+    };
+    const auto correctedPoseForFrame =
+        [&graphNodeForFrame, &previousFramePoses, &previousGraphPoses,
+         &optimizedGraphPoses](std::size_t frameIndex) {
+            const std::size_t graphNode = graphNodeForFrame(frameIndex);
+            const PoseGraphPose& oldAnchor = previousGraphPoses[graphNode];
+            const PoseGraphPose& newAnchor = optimizedGraphPoses[graphNode];
+            const PoseGraphPose& oldFrame = previousFramePoses[frameIndex];
+            const cv::Matx33d correctionRotation =
+                newAnchor.rotationWorldFromBody *
+                oldAnchor.rotationWorldFromBody.t();
+            PoseGraphPose corrected;
+            corrected.rotationWorldFromBody =
+                correctionRotation * oldFrame.rotationWorldFromBody;
+            corrected.positionWorld =
+                newAnchor.rotationWorldFromBody *
+                    (oldAnchor.rotationWorldFromBody.t() *
+                     (oldFrame.positionWorld - oldAnchor.positionWorld)) +
+                newAnchor.positionWorld;
+            return corrected;
+        };
+
+    for (std::size_t frameIndex = 0;
+         frameIndex < poseGraphPoses_.size(); ++frameIndex) {
+        poseGraphPoses_[frameIndex] =
+            correctedPoseForFrame(frameIndex);
+    }
+
+    for (std::size_t index = 0; index < trajectory_.size(); ++index) {
+        const cv::Matx33d correctionRotation =
+            poseGraphPoses_[index].rotationWorldFromBody *
+            previousFramePoses[index].rotationWorldFromBody.t();
+        trajectory_[index].positionWorld =
+            poseGraphPoses_[index].positionWorld;
+        trajectory_[index].rotationWorldBody =
+            poseGraphPoses_[index].rotationWorldFromBody;
+        trajectory_[index].velocityWorld =
+            correctionRotation * trajectory_[index].velocityWorld;
+    }
+
+    const auto transformMapPoint =
+        [&correctedPoseForFrame, &previousFramePoses](
+            const cv::Vec3d& point, std::size_t frameIndex) {
+            if (frameIndex >= previousFramePoses.size()) {
+                return point;
+            }
+            const PoseGraphPose& oldFrame = previousFramePoses[frameIndex];
+            const PoseGraphPose corrected = correctedPoseForFrame(frameIndex);
+            const cv::Vec3d local =
+                oldFrame.rotationWorldFromBody.t() *
+                (point - oldFrame.positionWorld);
+            return corrected.rotationWorldFromBody * local +
+                   corrected.positionWorld;
+        };
+
+    for (std::size_t index = 0; index < globalLidarMap_.size(); ++index) {
+        const cv::Point3d& point = globalLidarMap_[index];
+        const std::size_t frameIndex = mapPointFrameIndices_[index];
+        const cv::Vec3d corrected = transformMapPoint(
+            cv::Vec3d(point.x, point.y, point.z), frameIndex);
+        globalLidarMap_[index] =
+            cv::Point3d(corrected[0], corrected[1], corrected[2]);
+    }
+    for (std::size_t index = 0; index < metricLandmarks_.size(); ++index) {
+        const cv::Point3d& point = metricLandmarks_[index];
+        const cv::Vec3d corrected = transformMapPoint(
+            cv::Vec3d(point.x, point.y, point.z),
+            metricLandmarkFrameIndices_[index]);
+        metricLandmarks_[index] =
+            cv::Point3d(corrected[0], corrected[1], corrected[2]);
+    }
+    for (auto& point : currentScanWorld_) {
+        const std::size_t currentFrame = poseGraphPoses_.size() - 1;
+        const cv::Vec3d corrected = transformMapPoint(
+            cv::Vec3d(point.x, point.y, point.z), currentFrame);
+        point = cv::Point3d(corrected[0], corrected[1], corrected[2]);
+    }
+
+    const std::size_t currentFrame = poseGraphPoses_.size() - 1;
+    const cv::Matx33d correctionRotation =
+        poseGraphPoses_[currentFrame].rotationWorldFromBody *
+        previousFramePoses[currentFrame].rotationWorldFromBody.t();
+    state_.positionWorld = poseGraphPoses_[currentFrame].positionWorld;
+    state_.rotationWorldBody =
+        poseGraphPoses_[currentFrame].rotationWorldFromBody;
+    state_.velocityWorld = correctionRotation * state_.velocityWorld;
+}
+
 UAVState UAVHybridSLAM::processFrame(const cv::Mat& image,
                                      std::int64_t timestampNs,
                                      const std::optional<LidarScan>& scan) {
     const auto startTime = std::chrono::steady_clock::now();
     state_.timestampNs = timestampNs;
+    state_.loopClosed = false;
+    state_.loopCandidateFrame = -1;
+    state_.loopDriftMeters = 0.0;
     std::uint64_t frameMacs = 0;
 
     // 1. Fast Optical Invariant Test for Sudden Lighting Collapse
@@ -523,6 +875,39 @@ UAVState UAVHybridSLAM::processFrame(const cv::Mat& image,
             state_.confidence = std::clamp(0.40 * trackedRatio + 0.60 * (visualInliers >= 12 ? 1.0 : 0.0), 0.0, 1.0);
             state_.visualInliers = visualInliers;
             state_.lidarInliers = lidarInliers;
+        }
+    }
+
+    const std::size_t frameIndex = poseGraphPoses_.size();
+    const PoseGraphPose currentPose{state_.rotationWorldBody,
+                                    state_.positionWorld};
+    poseGraphPoses_.push_back(currentPose);
+
+    if (scan.has_value() && chosenMode != HybridPowerMode::VisualBypassLIO &&
+        !previousRawImage_.empty() && previousPoints_.size() >= 12) {
+        const auto recognitionPoints =
+            detectCorners(previousRawImage_, chosenMode);
+        const auto descriptors =
+            extractBinaryDescriptors(previousRawImage_, recognitionPoints);
+        detectAndCloseLoop(frameIndex, descriptors, *scan);
+        if (frameIndex % 10 == 0) {
+            LoopRecognitionKeyframe keyframe;
+            keyframe.frameIndex = frameIndex;
+            keyframe.descriptors = descriptors;
+            for (const auto& point : scan->points) {
+                const double squaredRange =
+                    static_cast<double>(point.x) * point.x +
+                    static_cast<double>(point.y) * point.y +
+                    static_cast<double>(point.z) * point.z;
+                if (squaredRange > 0.09 && squaredRange < 3600.0) {
+                    keyframe.lidarPointsBody.emplace_back(point.x, point.y,
+                                                          point.z);
+                }
+            }
+            if (keyframe.descriptors.size() >= 12 &&
+                keyframe.lidarPointsBody.size() >= 12) {
+                loopRecognitionKeyframes_.push_back(std::move(keyframe));
+            }
         }
     }
 
