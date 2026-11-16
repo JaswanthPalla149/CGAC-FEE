@@ -5,7 +5,9 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -223,23 +225,59 @@ void renderFastLivo2Simulation(
     // ==========================================
     const cv::Rect vp(422, 0, 856, 720);
 
-    // Virtual 3D perspective projection parameters
-    // Viewing the street from elevated perspective: center around (0, 2.0, 1.0)
-    const double viewCenterX = 0.0;
-    const double viewCenterY = 1.8;
-    const double viewCenterZ = 0.8;
-    const double scale3D = 75.0; // Pixels per meter
+    auto projectUnscaled = [](double x, double y, double z) {
+        return cv::Point2d(x * 0.88 - y * 0.45,
+                           -(z * 0.85 + y * 0.35 + x * 0.15));
+    };
+
+    double minProjectedX = std::numeric_limits<double>::max();
+    double maxProjectedX = std::numeric_limits<double>::lowest();
+    double minProjectedY = std::numeric_limits<double>::max();
+    double maxProjectedY = std::numeric_limits<double>::lowest();
+    auto includeInView = [&](double x, double y, double z) {
+        const cv::Point2d projected = projectUnscaled(x, y, z);
+        minProjectedX = std::min(minProjectedX, projected.x);
+        maxProjectedX = std::max(maxProjectedX, projected.x);
+        minProjectedY = std::min(minProjectedY, projected.y);
+        maxProjectedY = std::max(maxProjectedY, projected.y);
+    };
+
+    for (const cv::Point3d& point : {
+             cv::Point3d(-6.0, -1.0, 0.0), cv::Point3d(-6.0, 5.0, 0.0),
+             cv::Point3d(6.0, -1.0, 0.0), cv::Point3d(6.0, 5.0, 0.0),
+             cv::Point3d(-4.5, 3.8, 0.0), cv::Point3d(-4.5, 3.8, 2.8),
+             cv::Point3d(4.5, 3.8, 0.0), cv::Point3d(4.5, 3.8, 2.8)}) {
+        includeInView(point.x, point.y, point.z);
+    }
+    for (const auto& pose : trajectory) {
+        includeInView(pose.positionWorld[0], pose.positionWorld[1],
+                      pose.positionWorld[2]);
+    }
+    for (const auto& point : mapPoints) {
+        includeInView(point.x, point.y, point.z);
+    }
+    for (const auto& point : currentScanWorld) {
+        includeInView(point.x, point.y, point.z);
+    }
+
+    const double projectedWidth = maxProjectedX - minProjectedX;
+    const double projectedHeight = maxProjectedY - minProjectedY;
+    const double padding = 28.0;
+    const double scale3D = std::min(
+        75.0, std::min((vp.width - 2.0 * padding) / projectedWidth,
+                       (vp.height - 2.0 * padding) / projectedHeight));
+    const double screenOffsetX =
+        vp.x + (vp.width - projectedWidth * scale3D) * 0.5 -
+        minProjectedX * scale3D;
+    const double screenOffsetY =
+        vp.y + (vp.height - projectedHeight * scale3D) * 0.5 -
+        minProjectedY * scale3D;
 
     auto project3D = [&](double x, double y, double z) -> cv::Point {
-        // Isometric-perspective tilt
-        const double dx = x - viewCenterX;
-        const double dy = y - viewCenterY;
-        const double dz = z - viewCenterZ;
-
-        // Rotate ~30 deg elevation and ~20 deg azimuth
-        const double screenX = vp.x + vp.width * 0.5 + (dx * 0.88 - dy * 0.45) * scale3D;
-        const double screenY = vp.y + vp.height * 0.58 - (dz * 0.85 + dy * 0.35 + dx * 0.15) * scale3D;
-        return cv::Point(static_cast<int>(screenX), static_cast<int>(screenY));
+        const cv::Point2d projected = projectUnscaled(x, y, z);
+        return cv::Point(
+            static_cast<int>(screenOffsetX + projected.x * scale3D),
+            static_cast<int>(screenOffsetY + projected.y * scale3D));
     };
 
     // Draw Ground Grid on Z = 0

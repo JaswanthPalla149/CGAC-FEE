@@ -1,6 +1,7 @@
 #pragma once
 
 #include "adaptive_slam/controller.h"
+#include "adaptive_slam/hbst_matcher.hpp"
 
 #include <opencv2/core.hpp>
 
@@ -54,12 +55,23 @@ struct FrameResult {
     TrackingMode mode{TrackingMode::LowCost};
     int mapInliers{};
     bool trackingSucceeded{};
+    bool loopClosed{false};
+    int loopCandidateId{-1};
+    double loopDriftMeters{0.0};
 };
 
 struct Keyframe {
-    std::int64_t timestampNs{};
+    std::size_t id{0};
+    std::int64_t timestampNs{0};
     cv::Matx33d rotationWorldCamera{cv::Matx33d::eye()};
     cv::Vec3d positionWorld{0.0, 0.0, 0.0};
+    std::vector<cv::Point2f> points;
+    std::vector<int> landmarkIds;
+    std::vector<BinaryDescriptor> descriptors;
+
+    Keyframe() = default;
+    Keyframe(std::int64_t ts, const cv::Matx33d& R, const cv::Vec3d& t, std::size_t kf_id = 0)
+        : id(kf_id), timestampNs(ts), rotationWorldCamera(R), positionWorld(t) {}
 };
 
 class FeatureSLAM {
@@ -73,6 +85,8 @@ public:
 
     const std::vector<cv::Point3d>& landmarks() const noexcept;
     const std::vector<Keyframe>& keyframes() const noexcept;
+    std::size_t loopClosures() const noexcept { return loopClosures_; }
+    double maxLoopDriftMeters() const noexcept { return maxLoopDriftMeters_; }
 
 private:
     struct PoseEstimate {
@@ -100,6 +114,7 @@ private:
         const cv::Vec3d& previousPosition);
     static double confidenceScore(double trackedRatio, double inlierRatio,
                                   double reprojectionErrorPx);
+    bool detectAndCloseLoop(Keyframe& currentKf, FrameResult& result);
 
     CameraModel camera_;
     int minInliers_;
@@ -114,6 +129,8 @@ private:
     std::vector<cv::Point3d> landmarks_;
     std::vector<Keyframe> keyframes_;
     int frameIndex_{};
+    std::size_t loopClosures_{0};
+    double maxLoopDriftMeters_{0.0};
 };
 
 struct EuRoCFrame {
@@ -178,6 +195,8 @@ struct RunSummary {
     double controllerExitThreshold{kDefaultExitRecoveryAbove};
     double recoveryFraction{};
     std::size_t modeTransitions{};
+    std::size_t loopClosures{};
+    double maxLoopDriftMeters{};
 };
 
 RunSummary runConfiguration(const std::filesystem::path& sequencePath,

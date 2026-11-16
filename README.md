@@ -66,9 +66,12 @@ python scripts\download_euroc.py --sequence MH_01_easy --output datasets --force
 ```
 
 For a synthetic test sequence, use `scripts\generate_synthetic_euroc.py` and do
-not include it in a real EuRoC campaign. The batch runner accepts only full
-sequences with at least 1000 frames and IMU/ground-truth streams. It runs each
-selected degradation across all three configurations and writes per-sequence
+not include it in a real EuRoC campaign. Each invocation generates a randomized
+trajectory by default, prints its seed, and stores the seed in the replay
+manifest. Pass `--seed N` to reproduce a trajectory; use a different `--output`
+directory to keep multiple generated sequences. The batch runner accepts only
+full sequences with at least 1000 frames and IMU/ground-truth streams. It runs
+each selected degradation across all three configurations and writes per-sequence
 outputs, a combined summary, and a campaign manifest:
 
 ```powershell
@@ -77,6 +80,12 @@ python scripts\download_euroc.py --sequence MH_05_difficult --output datasets --
 python scripts\download_euroc.py --sequence V1_01_easy --output datasets --force-download
 python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root datasets --output results\euroc_campaign --degradations none,blur,low_light,noise,sudden_dim --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60
 python scripts\analyze_benchmark.py --input results\euroc_campaign\summary.csv --output results\euroc_campaign\comparisons.csv
+```
+
+For example, generate a reproducible synthetic path with:
+
+```powershell
+python scripts\generate_synthetic_euroc.py --output synthetic\retail-seed42 --frames 300 --seed 42
 ```
 
 The local `datasets/` folders currently contain short synthetic fallbacks, not
@@ -122,9 +131,22 @@ The UAV demo's `estimatedEnergyJoules` is a rough MAC/time model only. It is not
 
 #### Run the simulation
 
+From the repository root in PowerShell, run the 300-frame synthetic demo and write all artifacts
+to a dedicated results folder:
+
 ```powershell
-.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence synthetic\ecolivo-wsl --output results\ecolivo_sim --uav-hybrid
+.\build\cpp\Release\adaptive_slam_benchmark.exe --sequence synthetic\ecolivo-wsl --output results\local_simulation --degradations none --threads 1 --uav-hybrid --fps 0
 ```
+
+Add `--gui` to open the live OpenCV visualization. The run saves
+`fast_livo2_simulation.jpg` even without a GUI, alongside the summary, per-frame, trajectory, and
+map CSVs. `measurement_notes.md` in the output folder explains what each recorded metric measures.
+The benchmark CSVs measure the three visual configurations (fixed-low, fixed-high, adaptive);
+ATE/RPE are ground-truth-based and similarity-aligned, latency is per-frame processing time,
+tracking failures are counted over non-initial frames, and peak RSS is sampled at frame boundaries.
+Energy is a measured shared CPU-package counter only when available; the hybrid display's MAC-based
+energy estimate is a model, not a measurement. See the measurement details above before interpreting
+or comparing results.
 
 #### Inject a synthetic illumination shock
 

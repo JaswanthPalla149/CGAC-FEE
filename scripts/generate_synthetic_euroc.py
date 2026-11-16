@@ -2,9 +2,75 @@
 
 import argparse
 import math
+import secrets
 from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 import cv2
 import numpy as np
+
+
+def create_trajectory_parameters(
+    seed: Optional[int] = None,
+    closed_loop: bool = True,
+    total_frames: int = 300,
+) -> Tuple[int, Dict[str, float]]:
+    actual_seed = secrets.randbits(64) if seed is None else seed
+    if actual_seed < 0:
+        raise ValueError("seed must be non-negative")
+
+    rng = np.random.default_rng(actual_seed)
+    if closed_loop:
+        omega = 2.0 * math.pi / max(1, total_frames)
+        parameters = {
+            "closed_loop": 1.0,
+            "total_frames": float(total_frames),
+            "x_amplitude": float(rng.uniform(1.8, 2.4)),
+            "x_frequency": omega,
+            "x_phase": 0.0,
+            "y_amplitude": float(rng.uniform(0.6, 1.0)),
+            "y_frequency": omega,
+            "y_phase": 0.0,
+            "y_offset": float(rng.uniform(-2.4, -1.8)),
+            "z_base": float(rng.uniform(0.5, 0.7)),
+            "z_amplitude": float(rng.uniform(0.04, 0.08)),
+            "z_frequency": 2.0 * omega,
+            "z_phase": 0.0,
+        }
+    else:
+        parameters = {
+            "closed_loop": 0.0,
+            "total_frames": float(total_frames),
+            "x_amplitude": float(rng.uniform(1.2, 3.0)),
+            "x_frequency": float(rng.uniform(0.02, 0.06)),
+            "x_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+            "y_amplitude": float(rng.uniform(1.2, 3.0)),
+            "y_frequency": float(rng.uniform(0.02, 0.06)),
+            "y_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+            "y_offset": float(rng.uniform(-3.0, -1.5)),
+            "z_base": float(rng.uniform(0.4, 0.8)),
+            "z_amplitude": float(rng.uniform(0.02, 0.1)),
+            "z_frequency": float(rng.uniform(0.05, 0.15)),
+            "z_phase": float(rng.uniform(0.0, 2.0 * math.pi)),
+        }
+    return actual_seed, parameters
+
+
+def trajectory_position(
+    index: int, parameters: Dict[str, float]
+) -> Tuple[float, float, float]:
+    x = parameters["x_amplitude"] * math.sin(
+        index * parameters["x_frequency"] + parameters["x_phase"]
+    )
+    y = (
+        parameters["y_amplitude"]
+        * math.cos(index * parameters["y_frequency"] + parameters["y_phase"])
+        + parameters["y_offset"]
+    )
+    z = parameters["z_base"] + parameters["z_amplitude"] * math.sin(
+        index * parameters["z_frequency"] + parameters["z_phase"]
+    )
+    return x, y, z
 
 
 def create_retail_street_texture(tex_w: int = 1600, tex_h: int = 1000) -> np.ndarray:
@@ -150,8 +216,35 @@ def main() -> None:
     parser.add_argument("--frames", type=int, default=300)
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
-    parser.add_argument("--seed", type=int, default=17)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="random seed for reproducible trajectory generation (default: random)",
+    )
+    parser.add_argument(
+        "--closed-loop",
+        action="store_true",
+        default=True,
+        help="generate closed-loop trajectory that revisits initial location (default: True)",
+    )
+    parser.add_argument(
+        "--open-loop",
+        action="store_false",
+        dest="closed_loop",
+        help="generate open-loop randomized trajectory without revisit",
+    )
     args = parser.parse_args()
+
+    if args.seed is not None and args.seed < 0:
+        parser.error("--seed must be non-negative")
+    trajectory_seed, trajectory_parameters = create_trajectory_parameters(
+        args.seed, closed_loop=args.closed_loop, total_frames=args.frames
+    )
+    print(
+        f"Trajectory seed: {trajectory_seed} "
+        f"(reproduce with --seed {trajectory_seed})"
+    )
 
     sequence = Path(args.output)
     image_dir = sequence / "mav0" / "cam0" / "data"
@@ -187,10 +280,7 @@ def main() -> None:
         for index in range(args.frames):
             timestamp = index * 20_000_000
 
-            # Ground truth motion (smooth flight curve passing Burger King storefront)
-            x = 2.0 * math.sin(index * 0.035)
-            y = 2.0 * math.cos(index * 0.035) - 2.0
-            z = 0.5 + 0.05 * math.sin(index * 0.08)
+            x, y, z = trajectory_position(index, trajectory_parameters)
 
             truth_f.write(f"{timestamp},{x:.6f},{y:.6f},{z:.6f},0,0,0,1\n")
 
@@ -205,6 +295,7 @@ def main() -> None:
     with bag_path.open("w", encoding="ascii") as bag:
         bag.write("# EcoLIVO synthetic rosbag manifest\n")
         bag.write("format=ecolivo-bag/1\n")
+        bag.write(f"seed={trajectory_seed}\n")
         bag.write(f"sequence={sequence.as_posix()}\n")
         bag.write("camera_topic=/camera/image_raw\n")
         bag.write("lidar_topic=/lidar/points\n")

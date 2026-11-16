@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstring>
+#include <opencv2/core.hpp>
 
 #if defined(_MSC_VER)
 #include <intrin.h>
@@ -255,6 +256,56 @@ private:
     std::uint32_t original_indices_[kMaxFeatures]{};
     std::size_t feature_count_{0};
 };
+
+// Deterministic 256-bit BRIEF pixel comparison pattern
+inline const std::array<std::pair<cv::Point, cv::Point>, 256>& briefPattern() {
+    static const auto pattern = []() {
+        std::array<std::pair<cv::Point, cv::Point>, 256> p;
+        uint32_t state = 0x12345678;
+        auto nextGaussian = [&state]() -> int {
+            int sum = 0;
+            for (int k = 0; k < 6; ++k) {
+                state = state * 1664525u + 1013904223u;
+                sum += static_cast<int>((state >> 16) & 0x1F) - 16;
+            }
+            return std::clamp(sum / 2, -15, 15);
+        };
+        for (int i = 0; i < 256; ++i) {
+            p[i] = {cv::Point(nextGaussian(), nextGaussian()),
+                    cv::Point(nextGaussian(), nextGaussian())};
+        }
+        return p;
+    }();
+    return pattern;
+}
+
+inline BinaryDescriptor computeBriefDescriptor(const cv::Mat& image, const cv::Point2f& pt) {
+    BinaryDescriptor desc;
+    const int px = static_cast<int>(pt.x + 0.5f);
+    const int py = static_cast<int>(pt.y + 0.5f);
+    if (px < 16 || px >= image.cols - 16 || py < 16 || py >= image.rows - 16) {
+        return desc;
+    }
+    const auto& pattern = briefPattern();
+    for (int b = 0; b < 256; ++b) {
+        const auto& pair = pattern[b];
+        const uint8_t v1 = image.at<uint8_t>(py + pair.first.y, px + pair.first.x);
+        const uint8_t v2 = image.at<uint8_t>(py + pair.second.y, px + pair.second.x);
+        if (v1 < v2) {
+            desc.setBit(b, true);
+        }
+    }
+    return desc;
+}
+
+inline std::vector<BinaryDescriptor> computeBriefDescriptors(
+    const cv::Mat& image, const std::vector<cv::Point2f>& points) {
+    std::vector<BinaryDescriptor> descriptors(points.size());
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        descriptors[i] = computeBriefDescriptor(image, points[i]);
+    }
+    return descriptors;
+}
 
 } // namespace adaptive_slam
 
