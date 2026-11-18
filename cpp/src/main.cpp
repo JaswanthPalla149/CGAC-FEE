@@ -18,8 +18,15 @@
 #include <chrono>
 #include <vector>
 #include <cstdlib>
+#include <csignal>
 
 namespace {
+
+volatile std::sig_atomic_t stopRequested = 0;
+
+void requestStop(int) {
+    stopRequested = 1;
+}
 
 // Livox Avia multi-modal raycasting against 3D Retail Street environment
 adaptive_slam::LidarScan simulateAviaScan(
@@ -390,13 +397,17 @@ void printUsage(const char* executable) {
     std::cout
         << "Usage: " << executable
         << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N]"
+           " [--configuration all|fixed_low|fixed_high|adaptive]"
            " [--enter-recovery-below VALUE] [--exit-recovery-above VALUE]"
-           " [--uav-hybrid] [--test-shock SHOCK] [--fps N] [--gui]\n"
+           " [--uav-hybrid] [--uav-hybrid-only] [--test-shock SHOCK]"
+           " [--fps N] [--gui]\n"
         << "  LIST: comma-separated none,blur,low_light,noise,sudden_dim\n"
         << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
-        << " --sequence synthetic/ecolivo-wsl --output results/ecolivo --uav-hybrid --fps 10\n";
+        << " --sequence synthetic/ecolivo-wsl --output results/ecolivo"
+           " --uav-hybrid-only --gui --fps 10\n"
+        << "  Close the window or press Esc/q to stop and save partial UAV results.\n";
 }
 
 }  // namespace
@@ -406,10 +417,12 @@ int main(int argc, char** argv) {
         std::filesystem::path sequencePath;
         std::filesystem::path outputPath{"results"};
         std::vector<std::string> degradations{"none"};
+        std::string configuration = "all";
         int threads = 1;
         double enterRecoveryBelow = adaptive_slam::kDefaultEnterRecoveryBelow;
         double exitRecoveryAbove = adaptive_slam::kDefaultExitRecoveryAbove;
         bool runUavHybrid = false;
+        bool runUavHybridOnly = false;
         bool enableGui = false;
         std::string testShock;
         double replayFps = 0.0;
@@ -427,6 +440,11 @@ int main(int argc, char** argv) {
             }
             if (argument == "--uav-hybrid") {
                 runUavHybrid = true;
+                continue;
+            }
+            if (argument == "--uav-hybrid-only") {
+                runUavHybrid = true;
+                runUavHybridOnly = true;
                 continue;
             }
             if (argument == "--gui") {
@@ -451,6 +469,8 @@ int main(int argc, char** argv) {
                 outputPath = value;
             } else if (argument == "--degradations") {
                 degradations = splitList(value);
+            } else if (argument == "--configuration") {
+                configuration = value;
             } else if (argument == "--threads") {
                 threads = std::stoi(value);
             } else if (argument == "--enter-recovery-below") {
@@ -474,6 +494,13 @@ int main(int argc, char** argv) {
         if (threads < 1) {
             throw std::invalid_argument("--threads must be a positive integer");
         }
+        const std::vector<std::string> validConfigurations{
+            "all", "fixed_low", "fixed_high", "adaptive"};
+        if (std::find(validConfigurations.begin(), validConfigurations.end(),
+                      configuration) == validConfigurations.end()) {
+            throw std::invalid_argument(
+                "unsupported configuration: " + configuration);
+        }
         if (replayFps < 0.0 || replayFps > 240.0) {
             throw std::invalid_argument("--fps must be between 0 and 240");
         }
@@ -482,6 +509,9 @@ int main(int argc, char** argv) {
         cv::setNumThreads(threads);
 
         if (runUavHybrid) {
+            stopRequested = 0;
+            const auto previousSigIntHandler =
+                std::signal(SIGINT, requestStop);
             std::cout << "\n=======================================================\n"
                       << "Running SIMULATED UAV/LiDAR/IMU extension (EcoLIVO)\n"
                       << "=======================================================\n";
@@ -501,22 +531,35 @@ int main(int argc, char** argv) {
             const bool showLiveGui = enableGui || hasDisplay;
 
             std::string windowName = "fast_livo2.rviz* - EcoLIVO Simulation";
+            bool guiCreated = false;
             if (showLiveGui) {
                 try {
                     cv::namedWindow(windowName, cv::WINDOW_AUTOSIZE);
-                } catch (...) {
-                    // Headless fallback
+                    guiCreated = true;
+                } catch (const cv::Exception& error) {
+                    std::cerr << "Visualizer unavailable; continuing headless: "
+                              << error.what() << '\n';
                 }
             }
 
             int lowCostFrames = 0;
             int recoveryFrames = 0;
             int bypassFrames = 0;
+            std::size_t framesProcessed = 0;
+            bool stoppedEarly = false;
+            std::string stopReason = "completed";
             const std::size_t printInterval = std::max<std::size_t>(1, sequence.frames.size() / 30);
 
             cv::Mat rvizCanvas;
 
+            std::cout << "Close the visualization window or press Esc/q to stop "
+                         "and save partial results. Ctrl+C also saves.\n";
             for (std::size_t i = 0; i < sequence.frames.size(); ++i) {
+                if (stopRequested != 0) {
+                    stoppedEarly = true;
+                    stopReason = "ctrl_c";
+                    break;
+                }
                 const auto& frame = sequence.frames[i];
                 cv::Mat image = cv::imread(frame.imagePath.string(), cv::IMREAD_GRAYSCALE);
                 if (image.empty()) continue;
@@ -545,6 +588,7 @@ int main(int argc, char** argv) {
 
                 // Process synchronized multi-modal frame
                 auto state = hybridSlam.processFrame(image, frame.timestampNs, scan);
+                ++framesProcessed;
 
                 if (state.mode == adaptive_slam::HybridPowerMode::LowCost) ++lowCostFrames;
                 else if (state.mode == adaptive_slam::HybridPowerMode::Recovery) ++recoveryFrames;
@@ -570,11 +614,24 @@ int main(int argc, char** argv) {
                     currentAte
                 );
 
-                if (showLiveGui) {
+                if (guiCreated) {
                     try {
                         cv::imshow(windowName, rvizCanvas);
-                        cv::waitKey(1);
-                    } catch (...) {}
+                        const int key = cv::waitKey(1);
+                        if (key == 27 || key == 'q' || key == 'Q') {
+                            stoppedEarly = true;
+                            stopReason = "keyboard";
+                        } else if (cv::getWindowProperty(
+                                       windowName, cv::WND_PROP_VISIBLE) == 0.0) {
+                            stoppedEarly = true;
+                            stopReason = "window_closed";
+                        }
+                    } catch (const cv::Exception& error) {
+                        std::cerr << "Visualizer closed or unavailable: "
+                                  << error.what() << '\n';
+                        stoppedEarly = true;
+                        stopReason = "window_closed";
+                    }
                 }
 
                 if (i == 0 || (i + 1) % printInterval == 0 || i + 1 == sequence.frames.size()) {
@@ -591,17 +648,28 @@ int main(int argc, char** argv) {
                               << " time=" << std::setprecision(2) << state.elapsedMs << " ms\n";
                 }
 
+                if (stoppedEarly) break;
+
                 if (replayFps > 0.0 && i + 1 < sequence.frames.size()) {
                     const auto framePeriodMs = static_cast<int>(std::lround(1000.0 / replayFps));
                     std::this_thread::sleep_for(std::chrono::milliseconds(framePeriodMs));
                 }
             }
+            if (stopRequested != 0 && !stoppedEarly) {
+                stoppedEarly = true;
+                stopReason = "ctrl_c";
+            }
 
             // Save visualizer snapshot artifact matching FAST-LIVO2 RViz
             const auto snapshotPath = outputPath / "fast_livo2_simulation.jpg";
-            cv::imwrite(snapshotPath.string(), rvizCanvas);
-            std::cout << "\n[EcoLIVO Simulation] Saved RViz visualizer snapshot to: "
-                      << std::filesystem::absolute(snapshotPath).string() << "\n";
+            if (!rvizCanvas.empty()) {
+                if (!cv::imwrite(snapshotPath.string(), rvizCanvas)) {
+                    throw std::runtime_error("cannot write " +
+                                             snapshotPath.string());
+                }
+                std::cout << "\n[EcoLIVO Simulation] Saved RViz-style snapshot to: "
+                          << std::filesystem::absolute(snapshotPath).string() << "\n";
+            }
 
             const auto loopReportPath = outputPath / "uav_loop_closures.csv";
             std::ofstream loopReport(loopReportPath);
@@ -667,8 +735,40 @@ int main(int argc, char** argv) {
                                          trajectoryReportPath.string());
             }
 
-            std::cout << "UAV Hybrid SLAM Completed:\n"
-                      << "  Total Frames Processed   : " << sequence.frames.size() << '\n'
+            const auto runSummaryPath = outputPath / "uav_run_summary.csv";
+            std::ofstream runSummary(runSummaryPath);
+            if (!runSummary) {
+                throw std::runtime_error("cannot write " +
+                                         runSummaryPath.string());
+            }
+            runSummary
+                << "sequence,frames_available,frames_processed,stopped_early,"
+                   "stop_reason,low_cost_frames,recovery_frames,bypass_frames,"
+                   "loop_closures,model_energy_joules_not_measured\n"
+                << sequencePath.filename().string() << ','
+                << sequence.frames.size() << ',' << framesProcessed << ','
+                << (stoppedEarly ? 1 : 0) << ',' << stopReason << ','
+                << lowCostFrames << ',' << recoveryFrames << ',' << bypassFrames
+                << ',' << hybridSlam.loopClosures() << ','
+                << std::setprecision(10) << hybridSlam.totalEnergyJoules()
+                << '\n';
+            runSummary.close();
+            if (!runSummary) {
+                throw std::runtime_error("failed writing " +
+                                         runSummaryPath.string());
+            }
+
+            if (guiCreated) {
+                try {
+                    cv::destroyWindow(windowName);
+                } catch (const cv::Exception&) {
+                }
+            }
+            std::signal(SIGINT, previousSigIntHandler);
+
+            std::cout << "UAV Hybrid SLAM "
+                      << (stoppedEarly ? "Stopped" : "Completed") << ":\n"
+                      << "  Total Frames Processed   : " << framesProcessed << '\n'
                       << "  Nominal Low-Cost Frames  : " << lowCostFrames << '\n'
                       << "  Integer CLAHE Recovery   : " << recoveryFrames << '\n'
                       << "  Visual Bypass (0 MACs)   : " << bypassFrames << '\n'
@@ -682,12 +782,30 @@ int main(int argc, char** argv) {
                       << "  Total MAC Operations     : " << hybridSlam.totalMacOperations() << '\n'
                       << "  Total Model Energy (not measured): " << std::fixed << std::setprecision(3)
                       << hybridSlam.totalEnergyJoules() << " Joules\n"
+                      << "  Stop reason              : " << stopReason << '\n'
+                      << "  Run summary              : "
+                      << std::filesystem::absolute(runSummaryPath).string() << '\n'
                       << "=======================================================\n\n";
+
+            if (stoppedEarly || runUavHybridOnly) {
+                return stopReason == "ctrl_c" ? 130 : 0;
+            }
         }
 
-        const auto summaries = adaptive_slam::runBenchmark(
-            sequencePath, outputPath, degradations, enterRecoveryBelow,
-            exitRecoveryAbove);
+        std::vector<adaptive_slam::RunSummary> summaries;
+        if (configuration == "all") {
+            summaries = adaptive_slam::runBenchmark(
+                sequencePath, outputPath, degradations, enterRecoveryBelow,
+                exitRecoveryAbove);
+        } else {
+            summaries.reserve(degradations.size());
+            for (const auto& degradation : degradations) {
+                summaries.push_back(adaptive_slam::runConfiguration(
+                    sequencePath, outputPath, configuration, degradation, 17,
+                    enterRecoveryBelow, exitRecoveryAbove));
+            }
+            adaptive_slam::writeSummaries(outputPath, summaries);
+        }
         for (const auto& summary : summaries) {
             std::cout << std::setw(10) << summary.configuration << " / "
                       << std::setw(9) << std::left << summary.degradation

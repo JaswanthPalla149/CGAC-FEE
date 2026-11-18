@@ -164,15 +164,31 @@ tree) and `sensor_msgs/PointCloud2`, with a valid frame ID and timestamps.
 ### Power measurement considerations
 
 The benchmark's UAV-demo energy number is a model based on assumed MAC energy and a fixed power
-term; do not call it measured power. The summary CSV marks energy `not_measured`. Linux RAPL can
-measure CPU-package energy if the host exposes readable counters, but WSL often does not. RAPL is
-whole-package energy, not process-only energy. For whole-system energy, use a calibrated external
-power meter and state whether it measures the laptop input, the accelerator board, or another scope.
+term; do not call it measured power. Linux `perf` reports actual energy only when the kernel exposes
+a hardware energy event (for example `power/energy-pkg/`). Check before using it:
 
-The WSL host used for the current smoke run was an AMD Ryzen 9 8945HS, Ubuntu 20.04 under WSL2. No
-RAPL energy counter or `perf` executable was available there. Battery charge percentage alone does
-not reveal workload power. Do not infer watts or joules from frame latency, CPU time, or the
-displayed model-only energy.
+```bash
+perf list | grep -Ei 'power/energy|energy-pkg|energy-cores|energy-ram'
+```
+
+If that lists `power/energy-pkg/`, it can measure package energy for the whole command:
+
+```bash
+perf stat -e power/energy-pkg/ -- \
+  ./build-wsl/cpp/adaptive_slam_benchmark \
+  --sequence datasets/MH/MH_01_easy \
+  --output results/perf_uav \
+  --uav-hybrid-only --fps 0
+```
+
+This is package-wide energy during the whole run, not process-only energy. If `perf list` has no
+energy event, `perf stat` can still report CPU counters such as cycles and task-clock, but those are
+not power or energy measurements. WSL often does not expose the host's RAPL counters. For whole-
+system power in that case, use a calibrated external meter and state what it measures.
+
+The WSL host used for the current smoke run was an AMD Ryzen 9 8945HS under WSL2; no Linux RAPL
+energy counter was exposed. Battery charge percentage, CPU time, frame latency, and the hybrid
+display's model-only energy do not establish measured watts or joules.
 
 You can check whether Windows exposes a host counter even when WSL does not expose Linux RAPL:
 
@@ -181,12 +197,17 @@ typeperf.exe -q | grep -i "Energy Meter"
 ```
 
 If `\\Energy Meter(RAPL_Package0_PKG)\\Energy` is listed, sample it from a Windows PowerShell
-window while the WSL benchmark runs:
+window while the WSL benchmark runs. This Windows counter is not integrated into the Linux
+benchmark CSV:
 
 ```powershell
 typeperf "\Energy Meter(RAPL_Package0_PKG)\Energy" -si 1 `
   -o "$env:USERPROFILE\Desktop\euroc-energy.csv"
 ```
+
+For isolated configuration runs, pass `--configuration fixed_low`, `fixed_high`, or `adaptive` to
+the benchmark or batch runner; the default is `all`. Start a separate counter log for each
+configuration if comparing their measured package energy.
 
 Stop the logger after the run with Ctrl+C. Compute energy as the final minus initial cumulative
 counter value (pWh) times `3.6e-9` joules/pWh; divide by elapsed seconds for average package watts,
@@ -195,7 +216,8 @@ CPU-package energy; if you also report an idle-adjusted estimate, measure the id
 for the same duration and label the subtraction. The Linux benchmark will still say
 `not_measured` because this external Windows sample is not integrated into its CSV. If Windows
 does not list a suitable counter, use a calibrated external power meter or report energy as
-unavailable. Never substitute the UAV demo's MAC formula for measured energy.
+unavailable. Never substitute the UAV demo's MAC formula or ordinary `perf` CPU counters for
+measured power.
 
 ## Results generated in this workspace
 

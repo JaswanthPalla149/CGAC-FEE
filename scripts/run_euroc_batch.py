@@ -78,6 +78,10 @@ def main():
                         help="campaign output directory")
     parser.add_argument("--degradations", type=parse_degradations,
                         default=list(DEGRADATIONS))
+    parser.add_argument("--configuration",
+                        choices=("all", "fixed_low", "fixed_high", "adaptive"),
+                        default="all",
+                        help="run all configurations or only one for isolated measurement")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=1,
                         help="number of complete benchmark repetitions")
@@ -131,6 +135,7 @@ def main():
                 "--sequence", str(sequence),
                 "--output", str(repeat_output),
                 "--degradations", ",".join(args.degradations),
+                "--configuration", args.configuration,
                 "--threads", str(args.threads),
                 "--enter-recovery-below", str(args.enter_recovery_below),
                 "--exit-recovery-above", str(args.exit_recovery_above),
@@ -165,6 +170,7 @@ def main():
             path.name: validate_euroc_sequence(path) for path in sequences
         },
         "degradations": args.degradations,
+        "configuration": args.configuration,
         "opencv_threads": args.threads,
         "repeats": args.repeats,
         "controller_enter_threshold": args.enter_recovery_below,
