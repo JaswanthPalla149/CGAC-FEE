@@ -23,7 +23,7 @@ From the repository root in an Ubuntu terminal:
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake libopencv-dev pkg-config
+sudo apt install -y build-essential cmake libopencv-dev libopencv-viz-dev pkg-config
 cmake --version
 pkg-config --modversion opencv4
 
@@ -109,7 +109,51 @@ claim robustness against ORB-SLAM3 or DROID unless those systems are actually ru
 and protocol. If time only permits the project's own method, present it as a controlled perturbation
 study and list external systems as related work.
 
-After the three full sequences validate, run the compact final campaign from the repository root:
+For a quick adaptive-only smoke test on MH_01, process 400 frames and one
+degradation before launching a full run:
+
+```bash
+python3 scripts/run_euroc_batch.py \
+  --benchmark build-wsl/cpp/adaptive_slam_benchmark \
+  --dataset-root datasets/MH_01_easy \
+  --output results/mh01_vio_smoke \
+  --configurations adaptive \
+  --max-frames 400 \
+  --degradations sudden_dim \
+  --threads 1 \
+  --repeats 1 \
+  --gui
+```
+
+This is a capped smoke test, not the full simulation. For the complete MH_01
+sequence, use the same command without `--max-frames`:
+
+```bash
+python3 scripts/run_euroc_batch.py \
+  --benchmark build-wsl/cpp/adaptive_slam_benchmark \
+  --dataset-root datasets/MH_01_easy \
+  --output results/mh01_vio_full \
+  --configurations adaptive \
+  --degradations sudden_dim \
+  --threads 1 \
+  --repeats 1 \
+  --gui
+```
+
+The GUI shows tracked camera features and a separate interactive OpenCV Viz
+3D window with the sparse landmark cloud, camera trajectory, current camera
+position, and short-horizon IMU bridge. Use the mouse to rotate and zoom the
+3D view. This is a true 3D sparse reconstruction, not a 2D/isometric drawing
+or a dense mesh; monocular coordinates have arbitrary scale. The overlay
+reports confidence, mode, and whether a frame is using the IMU bridge. The
+3D viewer requires OpenCV's `viz` module and WSLg or another desktop display.
+Press `q` or Esc to close the previews while processing continues; if the
+viewers remain open, close the 3D window after the sequence completes. GUI
+rendering affects wall-time and energy measurements, so use it for inspection
+rather than performance reporting. This does not replace full-sequence
+validation.
+After the three full sequences validate, run the compact final campaign from
+the repository root:
 
 ```bash
 python3 scripts/run_euroc_batch.py \

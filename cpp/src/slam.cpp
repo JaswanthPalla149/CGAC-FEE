@@ -22,7 +22,7 @@ struct FeatureSettings {
 };
 
 FeatureSettings settingsFor(TrackingMode mode) {
-    if (mode == TrackingMode::Recovery) {
+    if (mode != TrackingMode::LowCost) {
         return {1400, 0.008, cv::Size(31, 31), 4};
     }
     return {450, 0.015, cv::Size(21, 21), 2};
@@ -74,7 +74,15 @@ cv::Mat projectionMatrix(const CameraModel& camera,
 }  // namespace
 
 const char* modeName(TrackingMode mode) noexcept {
-    return mode == TrackingMode::Recovery ? "recovery" : "low_cost";
+    switch (mode) {
+        case TrackingMode::LowCost:
+            return "low_cost";
+        case TrackingMode::Recovery:
+            return "recovery";
+        case TrackingMode::VisualInertial:
+            return "visual_inertial";
+    }
+    return "unknown";
 }
 
 cv::Matx33d CameraModel::matrix() const {
@@ -132,7 +140,8 @@ std::vector<cv::Point2f> FeatureSLAM::detect(const cv::Mat& image,
 FrameResult FeatureSLAM::process(const cv::Mat& image,
                                  std::int64_t timestampNs,
                                  TrackingMode mode,
-                                 std::optional<cv::Matx33d> gyroRotationPrior) {
+                                 std::optional<cv::Matx33d> gyroRotationPrior,
+                                 std::optional<cv::Vec3d> inertialTranslation) {
     const auto start = std::chrono::steady_clock::now();
     cv::Mat rawGray;
     if (image.channels() == 1) {
@@ -152,7 +161,7 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     if (previousRawImage_.empty()) {
         previousRawImage_ = rawGray.clone();
         previousPreparedLowCost_ = rawGray.clone();
-        if (mode == TrackingMode::Recovery) {
+        if (mode != TrackingMode::LowCost) {
             previousPreparedRecovery_ = currentImage.clone();
         } else {
             previousPreparedRecovery_.release();
@@ -258,6 +267,16 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
         }
     }
 
+    if (!poseUpdated && mode == TrackingMode::VisualInertial &&
+        inertialTranslation.has_value()) {
+        if (!std::isfinite((*inertialTranslation)[0]) ||
+            !std::isfinite((*inertialTranslation)[1]) ||
+            !std::isfinite((*inertialTranslation)[2])) {
+            throw std::invalid_argument("inertial translation must be finite");
+        }
+        result.inertialFallback = true;
+    }
+
     const int maxCorners = settingsFor(mode).maxCorners;
     std::vector<cv::Point2f> nextPoints = newTracked;
     std::vector<int> nextIds = trackedIds;
@@ -283,7 +302,7 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
 
     previousRawImage_ = rawGray.clone();
     previousPreparedLowCost_ = rawGray.clone();
-    if (mode == TrackingMode::Recovery) {
+    if (mode != TrackingMode::LowCost) {
         previousPreparedRecovery_ = currentImage.clone();
     } else {
         previousPreparedRecovery_.release();
@@ -292,7 +311,7 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     previousLandmarkIds_.swap(nextIds);
     ++frameIndex_;
     std::size_t poseAnchorKeyframe = keyframes_.size() - 1;
-    if (frameIndex_ % keyframeInterval_ == 0) {
+    if (poseUpdated && frameIndex_ % keyframeInterval_ == 0) {
         Keyframe kf(timestampNs, rotationWorldCamera_, positionWorld_, keyframes_.size());
         kf.points = previousPoints_;
         kf.landmarkIds = previousLandmarkIds_;
@@ -311,6 +330,9 @@ FrameResult FeatureSLAM::process(const cv::Mat& image,
     }
 
     result.position = positionWorld_;
+    if (result.inertialFallback) {
+        result.position += *inertialTranslation;
+    }
     framePoseHistory_.push_back(positionWorld_);
     frameAnchorKeyframes_.push_back(poseAnchorKeyframe);
     result.confidence = confidenceScore(result.trackedRatio, inlierRatio,

@@ -2,7 +2,7 @@
 
 The native C/C++ implementation is built with CMake and OpenCV. It provides an adaptive monocular feature-SLAM benchmark for EuRoC-format MAV sequences:
 
-- **C controller API:** confidence-based low-cost/recovery selection with hysteresis.
+- **Adaptive controller:** confidence-based low-cost/recovery selection, with a bounded visual-inertial fallback when calibrated EuRoC IMU data is available.
 - **C++ front end:** Shi-Tomasi features, pyramidal Lucas-Kanade tracking, camera-distortion correction, gyro-integrated rotation prior, essential-matrix RANSAC bootstrap/fallback, two-view triangulation, and map-based PnP RANSAC.
 - **C++ evaluator:** EuRoC-format input, fixed-low/fixed-high/adaptive runs, synthetic degradations, similarity-aligned ATE, translation RPE, and CSV outputs.
 
@@ -14,7 +14,8 @@ Requirements:
 
 - CMake 3.18 or newer.
 - A C11/C++17 compiler (Visual Studio 2022, GCC, or Clang).
-- OpenCV 4 development package with `core`, `imgproc`, `imgcodecs`, `video`, and `calib3d`.
+- OpenCV 4 development package with `core`, `imgproc`, `imgcodecs`, `video`,
+  `calib3d`, `highgui`, and `viz` (the Viz module requires VTK support).
 
 Configure and build from the workspace root:
 
@@ -34,6 +35,32 @@ If CMake can already find `OpenCVConfig.cmake`, omit `-DOpenCV_DIR`. The executa
 
 The sequence should contain `mav0\cam0\data.csv`, `mav0\cam0\data\`, and `mav0\cam0\sensor.yaml`. EuRoC ground truth at `mav0\state_groundtruth_estimate0\data.csv` is optional; it is needed for ATE.
 
+For a quick adaptive-only smoke test, process 400 frames from a full local
+sequence and one degradation instead of running all configurations over the
+entire sequence:
+
+```bash
+python3 scripts/run_euroc_batch.py \
+  --benchmark build-wsl/cpp/adaptive_slam_benchmark \
+  --dataset-root datasets/MH_01_easy \
+  --output results/mh01_vio_smoke \
+  --configurations adaptive \
+  --max-frames 400 \
+  --degradations sudden_dim \
+  --threads 1 \
+  --repeats 1 \
+  --gui
+```
+
+`--gui` opens the camera/feature view and an interactive OpenCV Viz 3D window
+with the sparse landmark cloud, camera trajectory, current camera position, and
+short-horizon IMU bridge. This is a true 3D sparse reconstruction, not a 2D
+projection or dense mesh; monocular coordinates have arbitrary scale. The
+viewer requires OpenCV's VTK-backed `viz` module and a desktop display/WSLg.
+This command is intentionally capped at 400 frames. To process the complete
+sequence, remove `--max-frames 400` (or use `--max-frames 0`). GUI runs are for
+visual inspection; rendering affects wall-time and energy measurements.
+
 Run all four synthetic visual conditions:
 
 ```powershell
@@ -52,7 +79,9 @@ On Windows, each configuration samples the PDH `Energy Meter(RAPL_Package0_PKG)\
 
 Memory columns distinguish RSS before/after the run from `peak_rss_bytes`, the maximum process RSS sampled at frame boundaries during that run. Brief within-frame peaks may be missed; this is not a per-module allocation measurement.
 
-The monocular controller defaults to entering recovery below `0.48` and returning to low-cost above `0.60`. The exit threshold is a provisional adjustment from the observed synthetic confidence trace (which peaked at `0.621` under the old `0.68` exit threshold), not a calibrated research result. Override thresholds with `--enter-recovery-below` and `--exit-recovery-above`; frame CSVs retain confidence and mode so switches can be inspected.
+The controller defaults to entering recovery below confidence `0.48` and returning to low-cost above `0.60`. With a low-motion gravity calibration from the first 0.5 seconds of accelerometer and gyro data, confidence below `0.40` instead enters `visual_inertial`; it returns to recovery above `0.48`. These thresholds are provisional, not calibrated research values. The fallback is capped at 250 ms, requires covered, well-formed IMU samples, and resets its velocity whenever visual tracking succeeds. Missing or unsuitable IMU calibration disables this mode and leaves the visual recovery path active. Thresholds can be changed with `--enter-recovery-below`, `--exit-recovery-above`, `--enter-visual-inertial-below`, and `--exit-visual-inertial-above`.
+
+This is a bounded recovery prototype, not a fully optimized VIO estimator: it does not estimate accelerometer/gyro biases or solve monocular scale. Inertial-only frames are marked by `inertial_fallback` in the frame CSV, counted in `inertial_fallback_frames`, and excluded from monocular ATE/RPE and visual-pose coverage. Their short-lived bridge coordinates are output-only and never update the visual map or its pose state; they are not metric ground truth or validated VIO output.
 
 To compare the adaptive run with both fixed baselines from one or more summaries:
 
@@ -83,7 +112,7 @@ and a campaign manifest:
 python scripts\download_euroc.py --sequence MH_03_medium --output datasets --force-download
 python scripts\download_euroc.py --sequence MH_05_difficult --output datasets --force-download
 python scripts\download_euroc.py --sequence V1_01_easy --output datasets --force-download
-python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root datasets --output results\euroc_campaign --degradations none,blur,low_light,noise,sudden_dim --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60
+python scripts\run_euroc_batch.py --benchmark build\cpp\Release\adaptive_slam_benchmark.exe --dataset-root datasets --output results\euroc_campaign --degradations none,blur,low_light,noise,sudden_dim --threads 1 --repeats 5 --enter-recovery-below 0.48 --exit-recovery-above 0.60 --enter-visual-inertial-below 0.40 --exit-visual-inertial-above 0.48
 python scripts\analyze_benchmark.py --input results\euroc_campaign\summary.csv --output results\euroc_campaign\comparisons.csv
 ```
 
@@ -107,7 +136,7 @@ and running it on the same local sequences and machine.
 
 The native implementation uses OpenCV's optimized kernels, reuses the CLAHE operator, caches the previous prepared image when the processing mode is unchanged, and defaults to one OpenCV thread for repeatable comparisons. A mode change requires preparing the prior frame in the new mode.
 
-This is a research baseline, not an ORB-SLAM3 equivalent. It now includes prototype loop closure in both pipelines: `FeatureSLAM` uses BRIEF place recognition and PnP-RANSAC verification; `UAVHybridSLAM` uses binary-descriptor recognition and one-to-one scan-to-scan ICP plus ordered-ray consistency checks. Both enforce a 150-frame/keyframe temporal exclusion. Accepted constraints are optimized in a native OpenCV-only 6-DoF relative-pose graph with a fixed first pose. The feature map is corrected by rigidly transforming landmarks from their anchor keyframes; this is not bundle adjustment. The UAV ordered-ray check relies on the deterministic synthetic raycaster and is not yet a physical-sensor loop-closure model. Monocular translation scale remains arbitrary, and gyro is used only as a rotation prior rather than full visual-inertial odometry. Relocalization after tracking loss and stereo/inertial fusion are not implemented, so drift and bad map points can still accumulate.
+This is a research baseline, not an ORB-SLAM3 equivalent. It now includes prototype loop closure in both pipelines: `FeatureSLAM` uses BRIEF place recognition and PnP-RANSAC verification; `UAVHybridSLAM` uses binary-descriptor recognition and one-to-one scan-to-scan ICP plus ordered-ray consistency checks. Both enforce a 150-frame/keyframe temporal exclusion. Accepted constraints are optimized in a native OpenCV-only 6-DoF relative-pose graph with a fixed first pose. The feature map is corrected by rigidly transforming landmarks from their anchor keyframes; this is not bundle adjustment. The UAV ordered-ray check relies on the deterministic synthetic raycaster and is not yet a physical-sensor loop-closure model. Monocular translation scale remains arbitrary. The adaptive path uses gyro rotation priors and a short, gravity-initialized accelerometer bridge only after low confidence; it has no bias estimation or joint visual-inertial optimization, and is not full VIO. Relocalization after tracking loss and stereo fusion are not implemented, so drift and bad map points can still accumulate.
 
 The benchmark `*_frames.csv` files record `loop_closed`, the accepted candidate keyframe, and pre-optimization drift in **monocular estimate units** (not meters). `summary.csv` reports the number of verified closures and maximum pre-optimization drift. For the UAV demo, `uav_loop_closures.csv` contains one row per accepted closure, with comments describing the descriptor/ICP checks; its drift is a metric relative-translation discrepancy in meters. `uav_trajectory.csv` stores the estimated per-frame positions and closure events. The synthetic generator closes the first and final poses by default (`--open-loop` disables this); a closed route is still not proof of loop detection. Check the recorded closure events and inspect the saved trajectory/map.
 

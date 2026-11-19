@@ -402,7 +402,10 @@ void printUsage(const char* executable) {
            " [--uav-hybrid] [--uav-hybrid-only] [--test-shock SHOCK]"
            " [--fps N] [--gui]\n"
         << "  LIST: comma-separated none,blur,low_light,noise,sudden_dim\n"
+        << "  Configurations: fixed_low,fixed_high,adaptive (default: all)\n"
+        << "  --max-frames limits evaluator frames; default processes all frames\n"
         << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
+        << "  Visual-inertial defaults: enter below 0.40, exit above 0.48\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
         << " --sequence synthetic/ecolivo-wsl --output results/ecolivo"
@@ -421,6 +424,10 @@ int main(int argc, char** argv) {
         int threads = 1;
         double enterRecoveryBelow = adaptive_slam::kDefaultEnterRecoveryBelow;
         double exitRecoveryAbove = adaptive_slam::kDefaultExitRecoveryAbove;
+        double enterVisualInertialBelow =
+            adaptive_slam::kDefaultEnterVisualInertialBelow;
+        double exitVisualInertialAbove =
+            adaptive_slam::kDefaultExitVisualInertialAbove;
         bool runUavHybrid = false;
         bool runUavHybridOnly = false;
         bool enableGui = false;
@@ -477,6 +484,10 @@ int main(int argc, char** argv) {
                 enterRecoveryBelow = std::stod(value);
             } else if (argument == "--exit-recovery-above") {
                 exitRecoveryAbove = std::stod(value);
+            } else if (argument == "--enter-visual-inertial-below") {
+                enterVisualInertialBelow = std::stod(value);
+            } else if (argument == "--exit-visual-inertial-above") {
+                exitVisualInertialAbove = std::stod(value);
             } else if (argument == "--test-shock") {
                 testShock = value;
                 runUavHybrid = true;
@@ -504,6 +515,14 @@ int main(int argc, char** argv) {
         if (replayFps < 0.0 || replayFps > 240.0) {
             throw std::invalid_argument("--fps must be between 0 and 240");
         }
+        if (configurations.empty()) {
+            throw std::invalid_argument(
+                "--configurations must select at least one mode");
+        }
+        adaptive_slam::AdaptiveController thresholdCheck(
+            enterRecoveryBelow, exitRecoveryAbove, enterVisualInertialBelow,
+            exitVisualInertialAbove);
+        static_cast<void>(thresholdCheck);
 
         cv::setUseOptimized(true);
         cv::setNumThreads(threads);

@@ -1,7 +1,9 @@
 #include "adaptive_slam/slam.hpp"
 
+#include <opencv2/highgui.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#include <opencv2/viz.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -10,6 +12,7 @@
 #include <fstream>
 #include <iomanip>
 #include <numeric>
+#include <memory>
 #include <random>
 #include <regex>
 #include <sstream>
@@ -409,6 +412,7 @@ void writeFrameRows(const std::filesystem::path& path,
     output << "timestamp_ns,x,y,z,confidence,tracked_ratio,inlier_ratio,"
               "reprojection_error_px,active_features,inliers,map_inliers,"
               "elapsed_ms,mode,tracking_succeeded,loop_closed,"
+              "inertial_fallback,"
               "loop_candidate_keyframe,"
               "loop_drift_before_optimization_estimate_units\n"
            << std::setprecision(10);
@@ -422,6 +426,7 @@ void writeFrameRows(const std::filesystem::path& path,
                << modeName(frame.mode) << ','
                << (frame.trackingSucceeded ? 1 : 0) << ','
                << (frame.loopClosed ? 1 : 0) << ','
+               << (frame.inertialFallback ? 1 : 0) << ','
                << frame.loopCandidateId << ','
                << frame.loopDriftEstimateUnits << '\n';
     }
@@ -546,7 +551,7 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
                 continue;
             }
             const auto columns = splitCsvLine(line);
-            if (columns.size() < 4) {
+            if (columns.size() < 7) {
                 throw std::runtime_error(
                     "invalid IMU CSV row in " + imuPath.string());
             }
@@ -556,10 +561,16 @@ EuRoCSequence loadEuRoC(const std::filesystem::path& sequencePath) {
                 sample.angularVelocity = cv::Vec3d(
                     std::stod(columns[1]), std::stod(columns[2]),
                     std::stod(columns[3]));
+                sample.linearAcceleration = cv::Vec3d(
+                    std::stod(columns[4]), std::stod(columns[5]),
+                    std::stod(columns[6]));
                 if (sample.timestampNs <= previousImuTimestamp ||
                     !std::isfinite(sample.angularVelocity[0]) ||
                     !std::isfinite(sample.angularVelocity[1]) ||
-                    !std::isfinite(sample.angularVelocity[2])) {
+                    !std::isfinite(sample.angularVelocity[2]) ||
+                    !std::isfinite(sample.linearAcceleration[0]) ||
+                    !std::isfinite(sample.linearAcceleration[1]) ||
+                    !std::isfinite(sample.linearAcceleration[2])) {
                     throw std::runtime_error(
                         "invalid or unordered IMU sample in " + imuPath.string());
                 }
@@ -681,6 +692,355 @@ std::optional<cv::Matx33d> integrateGyroscopeRotation(
     return relativeRotation;
 }
 
+std::optional<InertialPreintegration> integrateInertialTranslation(
+    const std::vector<GyroscopeSample>& samples,
+    std::int64_t startTimestampNs, std::int64_t endTimestampNs,
+    const cv::Matx33d& rotationWorldCamera,
+    const cv::Matx33d& cameraFromImu, const cv::Vec3d& gravityWorld,
+    const cv::Vec3d& initialVelocity) {
+    if (samples.size() < 2 || endTimestampNs <= startTimestampNs ||
+        startTimestampNs < samples.front().timestampNs ||
+        endTimestampNs > samples.back().timestampNs ||
+        endTimestampNs - startTimestampNs > 100000000 ||
+        !std::isfinite(cv::norm(gravityWorld)) ||
+        !std::isfinite(cv::norm(initialVelocity))) {
+        return std::nullopt;
+    }
+
+    const auto sampleAt = [&samples](std::int64_t timestamp)
+        -> std::optional<GyroscopeSample> {
+        const auto upper = std::lower_bound(
+            samples.begin(), samples.end(), timestamp,
+            [](const GyroscopeSample& sample, std::int64_t value) {
+                return sample.timestampNs < value;
+            });
+        if (upper == samples.end()) {
+            return std::nullopt;
+        }
+        if (upper->timestampNs == timestamp) {
+            return *upper;
+        }
+        if (upper == samples.begin()) {
+            return std::nullopt;
+        }
+        const GyroscopeSample& left = *(upper - 1);
+        const double fraction =
+            static_cast<double>(timestamp - left.timestampNs) /
+            static_cast<double>(upper->timestampNs - left.timestampNs);
+        return GyroscopeSample{
+            timestamp,
+            left.angularVelocity * (1.0 - fraction) +
+                upper->angularVelocity * fraction,
+            left.linearAcceleration * (1.0 - fraction) +
+                upper->linearAcceleration * fraction};
+    };
+
+    std::vector<std::int64_t> timestamps{startTimestampNs};
+    for (const GyroscopeSample& sample : samples) {
+        if (sample.timestampNs > startTimestampNs &&
+            sample.timestampNs < endTimestampNs) {
+            timestamps.push_back(sample.timestampNs);
+        }
+    }
+    timestamps.push_back(endTimestampNs);
+
+    cv::Vec3d position(0.0, 0.0, 0.0);
+    cv::Vec3d velocity = initialVelocity;
+    cv::Matx33d relativeRotation = cv::Matx33d::eye();
+    for (std::size_t i = 1; i < timestamps.size(); ++i) {
+        const std::int64_t leftTimestamp = timestamps[i - 1];
+        const std::int64_t rightTimestamp = timestamps[i];
+        const double dt = static_cast<double>(rightTimestamp - leftTimestamp) *
+                          1e-9;
+        if (!(dt > 0.0 && dt <= 0.02)) {
+            return std::nullopt;
+        }
+        const auto left = sampleAt(leftTimestamp);
+        const auto right = sampleAt(rightTimestamp);
+        if (!left.has_value() || !right.has_value()) {
+            return std::nullopt;
+        }
+        const cv::Vec3d angularVelocity =
+            cameraFromImu *
+            ((left->angularVelocity + right->angularVelocity) * 0.5);
+        if (!std::isfinite(cv::norm(angularVelocity)) ||
+            cv::norm(angularVelocity) > 20.0) {
+            return std::nullopt;
+        }
+        const cv::Vec3d halfRotationVector = -angularVelocity * (0.5 * dt);
+        const cv::Vec3d rotationVector = halfRotationVector * 2.0;
+        if (!std::isfinite(cv::norm(left->linearAcceleration)) ||
+            !std::isfinite(cv::norm(right->linearAcceleration)) ||
+            cv::norm((left->linearAcceleration + right->linearAcceleration) *
+                     0.5) > 30.0) {
+            return std::nullopt;
+        }
+        const auto rotationIncrement = [](const cv::Vec3d& vector) {
+            const double angle = cv::norm(vector);
+            const cv::Matx33d skew(
+                0.0, -vector[2], vector[1], vector[2], 0.0, -vector[0],
+                -vector[1], vector[0], 0.0);
+            const double firstScale =
+                angle < 1e-8 ? 1.0 : std::sin(angle) / angle;
+            const double secondScale =
+                angle < 1e-8 ? 0.5 : (1.0 - std::cos(angle)) / (angle * angle);
+            return cv::Matx33d::eye() + firstScale * skew +
+                   secondScale * (skew * skew);
+        };
+        const cv::Matx33d midpointRotation =
+            rotationIncrement(halfRotationVector) * relativeRotation;
+        const cv::Matx33d rotationWorldCameraAtMidpoint =
+            rotationWorldCamera * midpointRotation.t();
+        const cv::Vec3d specificForceCamera =
+            cameraFromImu *
+            ((left->linearAcceleration + right->linearAcceleration) * 0.5);
+        const cv::Vec3d accelerationWorld =
+            rotationWorldCameraAtMidpoint * specificForceCamera + gravityWorld;
+        position += velocity * dt + accelerationWorld * (0.5 * dt * dt);
+        velocity += accelerationWorld * dt;
+        relativeRotation =
+            rotationIncrement(rotationVector) * relativeRotation;
+    }
+    return InertialPreintegration{
+        position, velocity, rotationWorldCamera * relativeRotation.t()};
+}
+
+namespace {
+
+class BoundedInertialFallback {
+public:
+    BoundedInertialFallback(const std::vector<GyroscopeSample>& samples,
+                            const cv::Matx33d& cameraFromImu)
+        : samples_(samples), cameraFromImu_(cameraFromImu) {
+        if (samples_.size() < 20 ||
+            samples_.back().timestampNs - samples_.front().timestampNs <
+                500000000) {
+            return;
+        }
+        const std::int64_t calibrationEnd =
+            samples_.front().timestampNs + 500000000;
+        cv::Vec3d meanAcceleration(0.0, 0.0, 0.0);
+        std::size_t count = 0;
+        for (const GyroscopeSample& sample : samples_) {
+            if (sample.timestampNs > calibrationEnd) {
+                break;
+            }
+            meanAcceleration += cameraFromImu_ * sample.linearAcceleration;
+            ++count;
+        }
+        if (count < 20) {
+            return;
+        }
+        meanAcceleration *= 1.0 / static_cast<double>(count);
+        double squaredDeviation = 0.0;
+        double squaredAngularRate = 0.0;
+        for (const GyroscopeSample& sample : samples_) {
+            if (sample.timestampNs > calibrationEnd) {
+                break;
+            }
+            const cv::Vec3d delta =
+                cameraFromImu_ * sample.linearAcceleration - meanAcceleration;
+            squaredDeviation += delta.dot(delta);
+            squaredAngularRate += sample.angularVelocity.dot(
+                sample.angularVelocity);
+        }
+        const double rmsDeviation =
+            std::sqrt(squaredDeviation / static_cast<double>(count));
+        const double rmsAngularRate =
+            std::sqrt(squaredAngularRate / static_cast<double>(count));
+        const double gravityMagnitude = cv::norm(meanAcceleration);
+        if (!std::isfinite(rmsDeviation) || !std::isfinite(rmsAngularRate) ||
+            rmsDeviation > 1.0 || rmsAngularRate > 0.2 ||
+            gravityMagnitude < 8.5 || gravityMagnitude > 11.2) {
+            return;
+        }
+        gravityWorld_ = -meanAcceleration;
+        calibrated_ = true;
+    }
+
+    bool available() const noexcept { return calibrated_; }
+
+    std::optional<cv::Vec3d> predict(std::int64_t startTimestampNs,
+                                     std::int64_t endTimestampNs,
+                                     const cv::Matx33d& rotationWorldCamera) {
+        if (!calibrated_ || endTimestampNs <= startTimestampNs) {
+            reset();
+            return std::nullopt;
+        }
+        const double dt =
+            static_cast<double>(endTimestampNs - startTimestampNs) * 1e-9;
+        if (fallbackDurationSeconds_ + dt > 0.25) {
+            reset();
+            return std::nullopt;
+        }
+        if (!active_) {
+            fallbackRotationWorldCamera_ = rotationWorldCamera;
+            active_ = true;
+        }
+        const auto integrated = integrateInertialTranslation(
+            samples_, startTimestampNs, endTimestampNs,
+            fallbackRotationWorldCamera_,
+            cameraFromImu_, gravityWorld_, velocity_);
+        if (!integrated.has_value()) {
+            reset();
+            return std::nullopt;
+        }
+        velocity_ = integrated->velocity;
+        fallbackRotationWorldCamera_ = integrated->rotationWorldCamera;
+        fallbackDisplacementWorld_ += integrated->displacement;
+        fallbackDurationSeconds_ += dt;
+        return fallbackDisplacementWorld_;
+    }
+
+    void reset() noexcept {
+        velocity_ = cv::Vec3d(0.0, 0.0, 0.0);
+        fallbackDisplacementWorld_ = cv::Vec3d(0.0, 0.0, 0.0);
+        fallbackDurationSeconds_ = 0.0;
+        active_ = false;
+    }
+
+private:
+    const std::vector<GyroscopeSample>& samples_;
+    cv::Matx33d cameraFromImu_;
+    cv::Vec3d gravityWorld_{0.0, 0.0, 0.0};
+    cv::Vec3d velocity_{0.0, 0.0, 0.0};
+    cv::Vec3d fallbackDisplacementWorld_{0.0, 0.0, 0.0};
+    cv::Matx33d fallbackRotationWorldCamera_{cv::Matx33d::eye()};
+    double fallbackDurationSeconds_{};
+    bool calibrated_{};
+    bool active_{};
+};
+
+void showBenchmarkFrame(const std::string& windowName, const cv::Mat& image,
+                        const FrameResult& result,
+                        const std::vector<cv::Point2f>& features) {
+    cv::Mat display;
+    cv::cvtColor(image, display, cv::COLOR_GRAY2BGR);
+    const cv::Scalar featureColor =
+        result.inertialFallback ? cv::Scalar(0, 165, 255)
+                                : cv::Scalar(0, 220, 0);
+    for (const cv::Point2f& feature : features) {
+        cv::circle(display, feature, 2, featureColor, -1, cv::LINE_AA);
+    }
+
+    std::ostringstream status;
+    status << "Mode: " << modeName(result.mode) << "  confidence: "
+           << std::fixed << std::setprecision(3) << result.confidence;
+    cv::putText(display, status.str(), cv::Point(16, 28),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(20, 20, 20), 4,
+                cv::LINE_AA);
+    cv::putText(display, status.str(), cv::Point(16, 28),
+                cv::FONT_HERSHEY_SIMPLEX, 0.7, cv::Scalar(255, 255, 255), 1,
+                cv::LINE_AA);
+
+    const std::string trackingStatus =
+        result.inertialFallback
+            ? "IMU bridge (short horizon)"
+            : result.trackingSucceeded ? "Visual pose" : "Visual tracking lost";
+    cv::putText(display, trackingStatus, cv::Point(16, 56),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                result.inertialFallback ? cv::Scalar(0, 165, 255)
+                                        : cv::Scalar(255, 255, 255),
+                2, cv::LINE_AA);
+    cv::imshow(windowName, display);
+}
+
+void updateMapWindow(cv::viz::Viz3d& window,
+                     const std::vector<cv::Point3d>& landmarks,
+                     const std::vector<cv::Vec3d>& trajectory,
+                     const FrameResult& result, bool& hasCloud,
+                     bool& hasTrajectory, bool& hasCamera,
+                     bool& hasBridge, bool& hasStatus) {
+    std::vector<cv::Point3f> cloud;
+    const std::size_t stride =
+        std::max<std::size_t>(1, (landmarks.size() + 19999) / 20000);
+    cloud.reserve((landmarks.size() + stride - 1) / stride);
+    double sceneScale = 1.0;
+    for (std::size_t i = 0; i < landmarks.size(); i += stride) {
+        const cv::Point3d& point = landmarks[i];
+        cloud.emplace_back(static_cast<float>(point.x),
+                           static_cast<float>(point.y),
+                           static_cast<float>(point.z));
+        sceneScale = std::max(sceneScale, cv::norm(point));
+    }
+    if (!cloud.empty()) {
+        if (hasCloud) {
+            window.removeWidget("landmarks");
+        }
+        window.showWidget("landmarks",
+                          cv::viz::WCloud(cloud, cv::viz::Color::yellow()));
+        window.setRenderingProperty("landmarks", cv::viz::POINT_SIZE, 3);
+        if (!hasCloud) {
+            window.resetCameraViewpoint("landmarks");
+        }
+        hasCloud = true;
+    }
+
+    std::vector<cv::Point3f> path;
+    path.reserve(trajectory.size());
+    for (const cv::Vec3d& pose : trajectory) {
+        path.emplace_back(static_cast<float>(pose[0]),
+                          static_cast<float>(pose[1]),
+                          static_cast<float>(pose[2]));
+        sceneScale = std::max(sceneScale, cv::norm(pose));
+    }
+    if (path.size() > 1) {
+        if (hasTrajectory) {
+            window.removeWidget("trajectory");
+        }
+        window.showWidget("trajectory",
+                          cv::viz::WPolyLine(path, cv::viz::Color::orange()));
+        hasTrajectory = true;
+    }
+
+    if (!trajectory.empty()) {
+        if (hasCamera) {
+            window.removeWidget("camera");
+        }
+        const cv::Vec3d& position = trajectory.back();
+        window.showWidget(
+            "camera",
+            cv::viz::WSphere(cv::Point3d(position[0], position[1], position[2]),
+                             std::max(0.05, sceneScale * 0.01), 12,
+                             cv::viz::Color::green()));
+        hasCamera = true;
+        if (hasBridge) {
+            window.removeWidget("imu_bridge");
+            hasBridge = false;
+        }
+        if (result.inertialFallback) {
+            const cv::Point3d visualPosition(position[0], position[1],
+                                             position[2]);
+            const cv::Point3d inertialPosition(
+                result.position[0], result.position[1], result.position[2]);
+            if (cv::norm(inertialPosition - visualPosition) > 1e-6) {
+                window.showWidget(
+                    "imu_bridge",
+                    cv::viz::WArrow(
+                        visualPosition, inertialPosition,
+                        std::max(0.01, sceneScale * 0.005),
+                        cv::viz::Color::orange_red()));
+                hasBridge = true;
+            }
+        }
+    }
+
+    if (hasStatus) {
+        window.removeWidget("status");
+    }
+    std::ostringstream status;
+    status << "Mode: " << modeName(result.mode) << "  confidence: "
+           << std::fixed << std::setprecision(3) << result.confidence
+           << "  landmarks: " << landmarks.size();
+    window.showWidget(
+        "status",
+        cv::viz::WText(status.str(), cv::Point(10, 25), 16,
+                       cv::viz::Color::white()));
+    hasStatus = true;
+}
+
+}  // namespace
+
 cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
                          std::uint32_t seed, std::size_t frameIndex,
                          std::size_t frameCount) {
@@ -725,7 +1085,11 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
                             const std::string& degradation,
                             std::uint32_t seed,
                             double enterRecoveryBelow,
-                            double exitRecoveryAbove) {
+                            double exitRecoveryAbove,
+                            double enterVisualInertialBelow,
+                            double exitVisualInertialAbove,
+                            std::size_t maxFrames,
+                            bool visualize) {
     if (std::find(kModes.begin(), kModes.end(), configuration) == kModes.end()) {
         throw std::invalid_argument("unsupported configuration: " + configuration);
     }
@@ -736,12 +1100,19 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
 
     const EuRoCSequence sequence = loadEuRoC(sequencePath);
     FeatureSLAM slam(sequence.camera);
-    AdaptiveController controller(enterRecoveryBelow, exitRecoveryAbove);
+    AdaptiveController controller(enterRecoveryBelow, exitRecoveryAbove,
+                                  enterVisualInertialBelow,
+                                  exitVisualInertialAbove);
+    BoundedInertialFallback inertialFallback(sequence.gyroscope,
+                                              sequence.cameraFromImu);
     TrackingMode mode = configuration == "fixed_high"
                             ? TrackingMode::Recovery
                             : TrackingMode::LowCost;
+    const std::size_t frameCount =
+        maxFrames == 0 ? sequence.frames.size()
+                       : std::min(maxFrames, sequence.frames.size());
     std::vector<FrameResult> results;
-    results.reserve(sequence.frames.size());
+    results.reserve(frameCount);
     std::size_t transitions = 0;
     const std::int64_t rssBefore = processRssBytes();
     std::int64_t peakRss = rssBefore;
@@ -749,8 +1120,31 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     energyMeter.begin();
     const std::clock_t cpuStart = std::clock();
     const auto wallStart = std::chrono::steady_clock::now();
+    const std::string windowName =
+        "EuRoC adaptive SLAM - " + sequencePath.filename().string() + " (" +
+        configuration + ")";
+    const std::string mapWindowName =
+        "3D reconstruction - " + sequencePath.filename().string() + " (" +
+        configuration + ")";
+    bool guiActive = visualize;
+    std::unique_ptr<cv::viz::Viz3d> mapWindow;
+    bool hasCloud = false;
+    bool hasTrajectory = false;
+    bool hasCamera = false;
+    bool hasBridge = false;
+    bool hasStatus = false;
+    if (guiActive) {
+        cv::namedWindow(windowName, cv::WINDOW_NORMAL);
+        mapWindow = std::make_unique<cv::viz::Viz3d>(mapWindowName);
+        mapWindow->setWindowSize(cv::Size(1000, 750));
+        mapWindow->setBackgroundColor(cv::viz::Color(30, 30, 36));
+        mapWindow->showWidget("axes", cv::viz::WCoordinateSystem(0.5));
+        mapWindow->showWidget(
+            "grid", cv::viz::WGrid(cv::Vec2i(12, 12), cv::Vec2d(0.5, 0.5),
+                                   cv::viz::Color(70, 70, 70)));
+    }
 
-    for (std::size_t i = 0; i < sequence.frames.size(); ++i) {
+    for (std::size_t i = 0; i < frameCount; ++i) {
         const EuRoCFrame& frame = sequence.frames[i];
         cv::Mat image = cv::imread(frame.imagePath.string(), cv::IMREAD_GRAYSCALE);
         if (image.empty()) {
@@ -758,22 +1152,52 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         }
         image = applyDegradation(image, degradation,
                                  seed + static_cast<std::uint32_t>(i), i,
-                                 sequence.frames.size());
+                                 frameCount);
         std::optional<cv::Matx33d> gyroRotationPrior;
         if (i > 0) {
             gyroRotationPrior = integrateGyroscopeRotation(
                 sequence.gyroscope, sequence.frames[i - 1].timestampNs,
                 frame.timestampNs, sequence.cameraFromImu);
         }
+        std::optional<cv::Vec3d> inertialTranslation;
+        if (mode == TrackingMode::VisualInertial && i > 0) {
+            inertialTranslation = inertialFallback.predict(
+                sequence.frames[i - 1].timestampNs, frame.timestampNs,
+                slam.rotationWorldCamera());
+        } else if (mode != TrackingMode::VisualInertial) {
+            inertialFallback.reset();
+        }
         FrameResult result =
-            slam.process(image, frame.timestampNs, mode, gyroRotationPrior);
+            slam.process(image, frame.timestampNs, mode, gyroRotationPrior,
+                         inertialTranslation);
+        if (guiActive) {
+            showBenchmarkFrame(windowName, image, result,
+                               slam.currentFeatures());
+            updateMapWindow(*mapWindow, slam.landmarks(),
+                            slam.correctedFramePositions(), result, hasCloud,
+                            hasTrajectory, hasCamera, hasBridge, hasStatus);
+            mapWindow->spinOnce(1, true);
+            const int key = cv::waitKey(1);
+            if (key == 27 || key == 'q' || key == 'Q') {
+                cv::destroyWindow(windowName);
+                mapWindow->close();
+                guiActive = false;
+            } else if (mapWindow->wasStopped()) {
+                cv::destroyWindow(windowName);
+                guiActive = false;
+            }
+        }
+        if (result.trackingSucceeded) {
+            inertialFallback.reset();
+        }
         results.push_back(result);
         const std::int64_t sampledRss = processRssBytes();
         if (sampledRss >= 0) {
             peakRss = std::max(peakRss, sampledRss);
         }
         if (configuration == "adaptive") {
-            const TrackingMode nextMode = controller.choose(result.confidence, mode);
+            const TrackingMode nextMode = controller.choose(
+                result.confidence, mode, inertialFallback.available());
             transitions += nextMode != mode ? 1U : 0U;
             mode = nextMode;
         }
@@ -784,7 +1208,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
             "SLAM corrected trajectory size does not match processed frames");
     }
     for (std::size_t i = 0; i < results.size(); ++i) {
-        results[i].position = correctedPositions[i];
+        if (!results[i].inertialFallback) {
+            results[i].position = correctedPositions[i];
+        }
     }
 
     const EnergyMeasurement energy = energyMeter.finish();
@@ -817,6 +1243,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     summary.energyStatus = energy.status;
     summary.controllerEnterThreshold = enterRecoveryBelow;
     summary.controllerExitThreshold = exitRecoveryAbove;
+    summary.controllerEnterVisualInertialThreshold =
+        enterVisualInertialBelow;
+    summary.controllerExitVisualInertialThreshold = exitVisualInertialAbove;
     summary.modeTransitions = transitions;
     summary.loopClosures = slam.loopClosures();
     summary.maxLoopDriftEstimateUnits =
@@ -824,11 +1253,15 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
 
     std::vector<double> latencies;
     std::size_t recoveryFrames = 0;
+    std::size_t visualInertialFrames = 0;
     std::vector<std::optional<cv::Vec3d>> groundTruthByFrame(results.size());
     for (std::size_t i = 0; i < results.size(); ++i) {
         const FrameResult& result = results[i];
         latencies.push_back(result.elapsedMs);
         recoveryFrames += result.mode == TrackingMode::Recovery ? 1U : 0U;
+        visualInertialFrames +=
+            result.mode == TrackingMode::VisualInertial ? 1U : 0U;
+        summary.inertialFallbackFrames += result.inertialFallback ? 1U : 0U;
         if (i > 0 && !result.trackingSucceeded) {
             ++summary.trackingFailures;
         }
@@ -849,6 +1282,9 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
         static_cast<double>(std::max<std::size_t>(1, results.size() - 1));
     summary.recoveryFraction =
         static_cast<double>(recoveryFrames) /
+        static_cast<double>(std::max<std::size_t>(1, results.size()));
+    summary.visualInertialFraction =
+        static_cast<double>(visualInertialFrames) /
         static_cast<double>(std::max<std::size_t>(1, results.size()));
     if (sequence.groundTruth.has_value()) {
         std::vector<cv::Vec3d> matchedEstimates;
@@ -897,6 +1333,10 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
     writeFrameRows(outputPath / (stem + "_frames.csv"), results);
     writeTrajectory(outputPath / (stem + "_trajectory.csv"), results);
     writeMap(outputPath / (stem + "_map.csv"), slam);
+    if (guiActive) {
+        mapWindow->spin();
+        cv::destroyWindow(windowName);
+    }
     return summary;
 }
 
@@ -905,21 +1345,47 @@ std::vector<RunSummary> runBenchmark(
     const std::filesystem::path& outputPath,
     const std::vector<std::string>& degradations,
     double enterRecoveryBelow,
-    double exitRecoveryAbove) {
+    double exitRecoveryAbove,
+    double enterVisualInertialBelow,
+    double exitVisualInertialAbove,
+    const std::vector<std::string>& configurations,
+    std::size_t maxFrames,
+    bool visualize) {
+    if (degradations.empty()) {
+        throw std::invalid_argument("at least one degradation is required");
+    }
     for (const auto& degradation : degradations) {
         if (std::find(kDegradations.begin(), kDegradations.end(), degradation) ==
             kDegradations.end()) {
             throw std::invalid_argument("unsupported degradation: " + degradation);
         }
     }
+    if (configurations.empty()) {
+        throw std::invalid_argument("at least one configuration is required");
+    }
+    for (std::size_t i = 0; i < configurations.size(); ++i) {
+        const auto previousEnd =
+            configurations.begin() + static_cast<std::ptrdiff_t>(i);
+        if (std::find(kModes.begin(), kModes.end(), configurations[i]) ==
+                kModes.end() ||
+            std::find(configurations.begin(), previousEnd, configurations[i]) !=
+                previousEnd) {
+            throw std::invalid_argument(
+                "configurations must be a unique subset of fixed_low, "
+                "fixed_high, adaptive");
+        }
+    }
     std::vector<RunSummary> summaries;
-    summaries.reserve(degradations.size() * kModes.size());
+    summaries.reserve(degradations.size() * configurations.size());
     for (const auto& degradation : degradations) {
-        for (const auto& configuration : kModes) {
+        for (const auto& configuration : configurations) {
             summaries.push_back(runConfiguration(sequencePath, outputPath,
                                                   configuration, degradation, 17,
                                                   enterRecoveryBelow,
-                                                  exitRecoveryAbove));
+                                                  exitRecoveryAbove,
+                                                  enterVisualInertialBelow,
+                                                  exitVisualInertialAbove,
+                                                  maxFrames, visualize));
         }
     }
     writeSummaries(outputPath, summaries);
@@ -939,11 +1405,15 @@ void writeSummaries(const std::filesystem::path& outputPath,
               "ate_rmse_similarity_aligned,"
               "rpe_translation_rmse_similarity_aligned,"
               "tracking_failure_frames,tracking_failure_rate,mean_latency_ms,"
+              "inertial_fallback_frames,"
               "p95_latency_ms,wall_time_s,cpu_time_s,rss_delta_bytes,"
               "rss_after_bytes,peak_rss_bytes,energy_joules,energy_method,"
               "energy_scope,energy_status,recovery_mode_fraction,"
+              "visual_inertial_mode_fraction,"
               "mode_transitions,controller_enter_threshold,"
-              "controller_exit_threshold,loop_closures,"
+              "controller_exit_threshold,"
+              "controller_enter_visual_inertial_threshold,"
+              "controller_exit_visual_inertial_threshold,loop_closures,"
               "max_loop_drift_before_optimization_estimate_units,"
               "monocular_scale\n"
            << std::setprecision(10);
@@ -957,7 +1427,9 @@ void writeSummaries(const std::filesystem::path& outputPath,
                << summary.ateRmse << ','
                << summary.rpeTranslationRmse << ','
                << summary.trackingFailures << ',' << summary.failureRate << ','
-               << summary.meanLatencyMs << ',' << summary.p95LatencyMs << ','
+               << summary.meanLatencyMs << ','
+               << summary.inertialFallbackFrames << ','
+               << summary.p95LatencyMs << ','
                << summary.wallTimeSeconds << ',' << summary.cpuTimeSeconds << ','
                << summary.rssDeltaBytes << ',' << summary.rssAfterBytes << ','
                << summary.peakRssBytes << ',';
@@ -969,9 +1441,13 @@ void writeSummaries(const std::filesystem::path& outputPath,
         output << ',' << summary.energyMethod << ',' << summary.energyScope
                << ',' << summary.energyStatus << ','
                << summary.recoveryFraction << ','
+               << summary.visualInertialFraction << ','
                << summary.modeTransitions
         << ',' << summary.controllerEnterThreshold << ','
-        << summary.controllerExitThreshold << ',' << summary.loopClosures
+        << summary.controllerExitThreshold << ','
+        << summary.controllerEnterVisualInertialThreshold << ','
+        << summary.controllerExitVisualInertialThreshold << ','
+        << summary.loopClosures
         << ',' << summary.maxLoopDriftEstimateUnits
                << ",unknown_similarity_aligned\n";
     }
