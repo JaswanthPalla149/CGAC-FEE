@@ -90,10 +90,18 @@ def main():
                         help="campaign output directory")
     parser.add_argument("--degradations", type=parse_degradations,
                         default=list(DEGRADATIONS))
-    parser.add_argument("--configuration",
-                        choices=("all", "fixed_low", "fixed_high", "adaptive"),
-                        default="all",
-                        help="run all configurations or only one for isolated measurement")
+    configuration_group = parser.add_mutually_exclusive_group()
+    configuration_group.add_argument(
+        "--configurations", type=parse_configurations,
+        help="comma-separated subset of fixed_low,fixed_high,adaptive")
+    configuration_group.add_argument(
+        "--configuration",
+        choices=("all",) + CONFIGURATIONS,
+        help="legacy option: run all configurations or only one")
+    parser.add_argument("--max-frames", type=int, default=0,
+                        help="maximum frames per run; 0 processes all frames")
+    parser.add_argument("--gui", action="store_true",
+                        help="show live OpenCV visualization for each run")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=1,
                         help="number of complete benchmark repetitions")
@@ -102,6 +110,14 @@ def main():
     parser.add_argument("--enter-visual-inertial-below", type=float, default=0.40)
     parser.add_argument("--exit-visual-inertial-above", type=float, default=0.48)
     args = parser.parse_args()
+
+    if args.configuration is not None:
+        configurations = (
+            list(CONFIGURATIONS) if args.configuration == "all"
+            else [args.configuration]
+        )
+    else:
+        configurations = args.configurations or list(CONFIGURATIONS)
 
     benchmark = args.benchmark.resolve()
     dataset_root = args.dataset_root.resolve()
@@ -159,7 +175,8 @@ def main():
                 "--sequence", str(sequence),
                 "--output", str(repeat_output),
                 "--degradations", ",".join(args.degradations),
-                "--configuration", args.configuration,
+                "--configurations", ",".join(configurations),
+                "--max-frames", str(args.max_frames),
                 "--threads", str(args.threads),
                 "--enter-recovery-below", str(args.enter_recovery_below),
                 "--exit-recovery-above", str(args.exit_recovery_above),
@@ -200,7 +217,14 @@ def main():
             path.name: validate_euroc_sequence(path) for path in sequences
         },
         "degradations": args.degradations,
-        "configuration": args.configuration,
+        "configuration": (
+            args.configuration if args.configuration is not None
+            else "all" if configurations == list(CONFIGURATIONS)
+            else ",".join(configurations)
+        ),
+        "configurations": configurations,
+        "max_frames": args.max_frames,
+        "gui": args.gui,
         "opencv_threads": args.threads,
         "repeats": args.repeats,
         "controller_enter_threshold": args.enter_recovery_below,

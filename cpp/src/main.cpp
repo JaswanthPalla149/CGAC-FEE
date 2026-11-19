@@ -398,12 +398,15 @@ void printUsage(const char* executable) {
         << "Usage: " << executable
         << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N]"
            " [--configuration all|fixed_low|fixed_high|adaptive]"
+           " [--configurations LIST] [--max-frames N]"
            " [--enter-recovery-below VALUE] [--exit-recovery-above VALUE]"
+           " [--enter-visual-inertial-below VALUE]"
+           " [--exit-visual-inertial-above VALUE]"
            " [--uav-hybrid] [--uav-hybrid-only] [--test-shock SHOCK]"
            " [--fps N] [--gui]\n"
         << "  LIST: comma-separated none,blur,low_light,noise,sudden_dim\n"
         << "  Configurations: fixed_low,fixed_high,adaptive (default: all)\n"
-        << "  --max-frames limits evaluator frames; default processes all frames\n"
+        << "  --max-frames limits evaluator frames; 0 processes all frames\n"
         << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
         << "  Visual-inertial defaults: enter below 0.40, exit above 0.48\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
@@ -421,6 +424,11 @@ int main(int argc, char** argv) {
         std::filesystem::path outputPath{"results"};
         std::vector<std::string> degradations{"none"};
         std::string configuration = "all";
+        bool configurationSpecified = false;
+        std::vector<std::string> configurations{
+            "fixed_low", "fixed_high", "adaptive"};
+        bool configurationsSpecified = false;
+        std::size_t maxFrames = 0;
         int threads = 1;
         double enterRecoveryBelow = adaptive_slam::kDefaultEnterRecoveryBelow;
         double exitRecoveryAbove = adaptive_slam::kDefaultExitRecoveryAbove;
@@ -478,6 +486,24 @@ int main(int argc, char** argv) {
                 degradations = splitList(value);
             } else if (argument == "--configuration") {
                 configuration = value;
+                configurationSpecified = true;
+            } else if (argument == "--configurations") {
+                configurations = splitList(value);
+                configurationsSpecified = true;
+            } else if (argument == "--max-frames") {
+                if (value.empty() || value.front() == '-') {
+                    throw std::invalid_argument(
+                        "--max-frames must be zero or a positive integer");
+                }
+                std::size_t parsedLength = 0;
+                const unsigned long long parsed =
+                    std::stoull(value, &parsedLength);
+                if (parsedLength != value.size() ||
+                    parsed > std::numeric_limits<std::size_t>::max()) {
+                    throw std::invalid_argument(
+                        "--max-frames must be zero or a positive integer");
+                }
+                maxFrames = static_cast<std::size_t>(parsed);
             } else if (argument == "--threads") {
                 threads = std::stoi(value);
             } else if (argument == "--enter-recovery-below") {
@@ -505,12 +531,16 @@ int main(int argc, char** argv) {
         if (threads < 1) {
             throw std::invalid_argument("--threads must be a positive integer");
         }
-        const std::vector<std::string> validConfigurations{
-            "all", "fixed_low", "fixed_high", "adaptive"};
-        if (std::find(validConfigurations.begin(), validConfigurations.end(),
-                      configuration) == validConfigurations.end()) {
+        if (configurationSpecified && configurationsSpecified) {
             throw std::invalid_argument(
-                "unsupported configuration: " + configuration);
+                "use either --configuration or --configurations, not both");
+        }
+        if (configurationSpecified) {
+            if (configuration == "all") {
+                configurations = {"fixed_low", "fixed_high", "adaptive"};
+            } else {
+                configurations = {configuration};
+            }
         }
         if (replayFps < 0.0 || replayFps > 240.0) {
             throw std::invalid_argument("--fps must be between 0 and 240");
@@ -518,6 +548,21 @@ int main(int argc, char** argv) {
         if (configurations.empty()) {
             throw std::invalid_argument(
                 "--configurations must select at least one mode");
+        }
+        const std::vector<std::string> validConfigurations{
+            "fixed_low", "fixed_high", "adaptive"};
+        for (std::size_t i = 0; i < configurations.size(); ++i) {
+            const auto previousEnd =
+                configurations.begin() + static_cast<std::ptrdiff_t>(i);
+            if (std::find(validConfigurations.begin(),
+                          validConfigurations.end(), configurations[i]) ==
+                    validConfigurations.end() ||
+                std::find(configurations.begin(), previousEnd,
+                          configurations[i]) != previousEnd) {
+                throw std::invalid_argument(
+                    "configurations must be a unique subset of fixed_low, "
+                    "fixed_high, adaptive");
+            }
         }
         adaptive_slam::AdaptiveController thresholdCheck(
             enterRecoveryBelow, exitRecoveryAbove, enterVisualInertialBelow,
@@ -811,20 +856,10 @@ int main(int argc, char** argv) {
             }
         }
 
-        std::vector<adaptive_slam::RunSummary> summaries;
-        if (configuration == "all") {
-            summaries = adaptive_slam::runBenchmark(
-                sequencePath, outputPath, degradations, enterRecoveryBelow,
-                exitRecoveryAbove);
-        } else {
-            summaries.reserve(degradations.size());
-            for (const auto& degradation : degradations) {
-                summaries.push_back(adaptive_slam::runConfiguration(
-                    sequencePath, outputPath, configuration, degradation, 17,
-                    enterRecoveryBelow, exitRecoveryAbove));
-            }
-            adaptive_slam::writeSummaries(outputPath, summaries);
-        }
+        const auto summaries = adaptive_slam::runBenchmark(
+            sequencePath, outputPath, degradations, enterRecoveryBelow,
+            exitRecoveryAbove, enterVisualInertialBelow,
+            exitVisualInertialAbove, configurations, maxFrames, enableGui);
         for (const auto& summary : summaries) {
             std::cout << std::setw(10) << summary.configuration << " / "
                       << std::setw(9) << std::left << summary.degradation
