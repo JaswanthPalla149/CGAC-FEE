@@ -90,13 +90,10 @@ def main():
                         help="campaign output directory")
     parser.add_argument("--degradations", type=parse_degradations,
                         default=list(DEGRADATIONS))
-    parser.add_argument("--configurations", type=parse_configurations,
-                        default=list(CONFIGURATIONS),
-                        help="subset of fixed_low,fixed_high,adaptive")
-    parser.add_argument("--max-frames", type=int, default=0,
-                        help="maximum frames per run; 0 processes all frames")
-    parser.add_argument("--gui", action="store_true",
-                        help="show live OpenCV visualization for each run")
+    parser.add_argument("--configuration",
+                        choices=("all", "fixed_low", "fixed_high", "adaptive"),
+                        default="all",
+                        help="run all configurations or only one for isolated measurement")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=1,
                         help="number of complete benchmark repetitions")
@@ -162,8 +159,7 @@ def main():
                 "--sequence", str(sequence),
                 "--output", str(repeat_output),
                 "--degradations", ",".join(args.degradations),
-                "--configurations", ",".join(args.configurations),
-                "--max-frames", str(args.max_frames),
+                "--configuration", args.configuration,
                 "--threads", str(args.threads),
                 "--enter-recovery-below", str(args.enter_recovery_below),
                 "--exit-recovery-above", str(args.exit_recovery_above),
@@ -204,9 +200,7 @@ def main():
             path.name: validate_euroc_sequence(path) for path in sequences
         },
         "degradations": args.degradations,
-        "configurations": args.configurations,
-        "max_frames": args.max_frames,
-        "gui": args.gui,
+        "configuration": args.configuration,
         "opencv_threads": args.threads,
         "repeats": args.repeats,
         "controller_enter_threshold": args.enter_recovery_below,

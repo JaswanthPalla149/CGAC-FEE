@@ -69,6 +69,10 @@ Run all four synthetic visual conditions:
 
 `--threads` controls OpenCV's worker count and defaults to one to avoid uncontrolled CPU parallelism in power comparisons. Run each configuration under the same thread setting and machine conditions.
 
+Use `--configuration fixed_low`, `fixed_high`, or `adaptive` to run a single configuration; the
+default `all` runs all three. Single-configuration runs are useful when an external power logger
+must measure each mode separately.
+
 Each run writes frame and trajectory CSVs, a map CSV with landmarks/keyframes, and `summary.csv`. A tracking failure is a non-initial frame where neither map-based PnP nor essential-matrix motion estimation produced a pose with at least the configured minimum inliers; the failure rate is over non-initial frames. ATE uses only frames with valid estimated poses after one global Umeyama similarity alignment. If fewer than 50% of ground-truth-matched frames have valid poses, ATE/RPE are `nan` and `trajectory_status` explains why. Translation RPE uses only adjacent frames with valid poses after applying that same global alignment; it is not a full six-degree-of-freedom pose RPE. Ground truth is interpolated at image timestamps, and frames outside its timestamp range are excluded.
 
 On Windows, each configuration samples the PDH `Energy Meter(RAPL_Package0_PKG)\Energy` counter before and after the frame loop and converts the pWh delta to joules. `energy_scope=cpu_package_shared` means CPU-package energy, including idle consumption and other processes—not process-only or wall-socket energy. The summary records the counter method and status. If the counter cannot be read, energy stays `not_measured` with an explicit status; platforms without this counter do not get model-based numbers inserted. The UAV simulator's estimated energy is not used in the benchmark energy column.
@@ -172,7 +176,11 @@ to a dedicated results folder:
 
 Add `--gui` to open the live OpenCV visualization. The run saves
 `fast_livo2_simulation.jpg` even without a GUI, alongside the summary, per-frame, trajectory, and
-map CSVs. `measurement_notes.md` in the output folder explains what each recorded metric measures.
+map CSVs. Use `--uav-hybrid-only` to run only this simulation rather than continuing into the
+separate visual benchmark. Closing the window or pressing Esc/q stops the simulation and saves its
+partial trajectory, loop-closure report, snapshot (if a frame was rendered), and
+`uav_run_summary.csv`; Ctrl+C requests the same graceful save. `measurement_notes.md` in the output
+folder explains what each recorded metric measures.
 The benchmark CSVs measure the three visual configurations (fixed-low, fixed-high, adaptive);
 ATE/RPE are ground-truth-based and similarity-aligned, latency is per-frame processing time,
 tracking failures are counted over non-initial frames, and peak RSS is sampled at frame boundaries.
