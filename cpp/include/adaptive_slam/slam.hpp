@@ -19,19 +19,28 @@ namespace adaptive_slam {
 
 inline constexpr double kDefaultEnterRecoveryBelow = 0.48;
 inline constexpr double kDefaultExitRecoveryAbove = 0.60;
+inline constexpr double kDefaultEnterVisualInertialBelow = 0.40;
+inline constexpr double kDefaultExitVisualInertialAbove = 0.48;
 
-enum class TrackingMode { LowCost, Recovery };
+enum class TrackingMode { LowCost, Recovery, VisualInertial };
 
 const char* modeName(TrackingMode mode) noexcept;
 
 class AdaptiveController {
 public:
     AdaptiveController(double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
-                       double exitRecoveryAbove = kDefaultExitRecoveryAbove);
-    TrackingMode choose(double confidence, TrackingMode currentMode) const;
+                       double exitRecoveryAbove = kDefaultExitRecoveryAbove,
+                       double enterVisualInertialBelow =
+                           kDefaultEnterVisualInertialBelow,
+                       double exitVisualInertialAbove =
+                           kDefaultExitVisualInertialAbove);
+    TrackingMode choose(double confidence, TrackingMode currentMode,
+                        bool imuAvailable = false) const;
 
 private:
     adaptive_slam_controller controller_{};
+    double enterVisualInertialBelow_{};
+    double exitVisualInertialAbove_{};
 };
 
 struct CameraModel {
@@ -56,6 +65,7 @@ struct FrameResult {
     TrackingMode mode{TrackingMode::LowCost};
     int mapInliers{};
     bool trackingSucceeded{};
+    bool inertialFallback{};
     bool loopClosed{false};
     int loopCandidateId{-1};
     double loopDriftEstimateUnits{0.0};
@@ -82,10 +92,18 @@ public:
     FrameResult process(const cv::Mat& image, std::int64_t timestampNs,
                         TrackingMode mode,
                         std::optional<cv::Matx33d> gyroRotationPrior =
+                            std::nullopt,
+                        std::optional<cv::Vec3d> inertialTranslation =
                             std::nullopt);
 
     const std::vector<cv::Point3d>& landmarks() const noexcept;
     const std::vector<Keyframe>& keyframes() const noexcept;
+    const std::vector<cv::Point2f>& currentFeatures() const noexcept {
+        return previousPoints_;
+    }
+    const cv::Matx33d& rotationWorldCamera() const noexcept {
+        return rotationWorldCamera_;
+    }
     std::size_t loopClosures() const noexcept { return loopClosures_; }
     double maxLoopDriftEstimateUnits() const noexcept {
         return maxLoopDriftEstimateUnits_;
@@ -158,6 +176,13 @@ struct GroundTruth {
 struct GyroscopeSample {
     std::int64_t timestampNs{};
     cv::Vec3d angularVelocity{};
+    cv::Vec3d linearAcceleration{};
+};
+
+struct InertialPreintegration {
+    cv::Vec3d displacement{};
+    cv::Vec3d velocity{};
+    cv::Matx33d rotationWorldCamera{cv::Matx33d::eye()};
 };
 
 struct EuRoCSequence {
@@ -173,6 +198,12 @@ std::optional<cv::Matx33d> integrateGyroscopeRotation(
     const std::vector<GyroscopeSample>& samples,
     std::int64_t startTimestampNs, std::int64_t endTimestampNs,
     const cv::Matx33d& cameraFromImu);
+std::optional<InertialPreintegration> integrateInertialTranslation(
+    const std::vector<GyroscopeSample>& samples,
+    std::int64_t startTimestampNs, std::int64_t endTimestampNs,
+    const cv::Matx33d& rotationWorldCamera,
+    const cv::Matx33d& cameraFromImu, const cv::Vec3d& gravityWorld,
+    const cv::Vec3d& initialVelocity);
 cv::Mat applyDegradation(const cv::Mat& image, const std::string& degradation,
                          std::uint32_t seed);
 
@@ -191,6 +222,7 @@ struct RunSummary {
     double poseCoverage{std::numeric_limits<double>::quiet_NaN()};
     std::string trajectoryStatus{"no_ground_truth"};
     std::size_t trackingFailures{};
+    std::size_t inertialFallbackFrames{};
     double failureRate{};
     double meanLatencyMs{};
     double p95LatencyMs{};
@@ -205,7 +237,12 @@ struct RunSummary {
     std::string energyStatus{"unavailable"};
     double controllerEnterThreshold{kDefaultEnterRecoveryBelow};
     double controllerExitThreshold{kDefaultExitRecoveryAbove};
+    double controllerEnterVisualInertialThreshold{
+        kDefaultEnterVisualInertialBelow};
+    double controllerExitVisualInertialThreshold{
+        kDefaultExitVisualInertialAbove};
     double recoveryFraction{};
+    double visualInertialFraction{};
     std::size_t modeTransitions{};
     std::size_t loopClosures{};
     double maxLoopDriftEstimateUnits{};
@@ -217,13 +254,24 @@ RunSummary runConfiguration(const std::filesystem::path& sequencePath,
                             const std::string& degradation,
                             std::uint32_t seed = 17,
                             double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
-                            double exitRecoveryAbove = kDefaultExitRecoveryAbove);
+                            double exitRecoveryAbove = kDefaultExitRecoveryAbove,
+                            double enterVisualInertialBelow =
+                                kDefaultEnterVisualInertialBelow,
+                            double exitVisualInertialAbove =
+                                kDefaultExitVisualInertialAbove,
+                            std::size_t maxFrames = 0,
+                            bool visualize = false);
 std::vector<RunSummary> runBenchmark(
     const std::filesystem::path& sequencePath,
     const std::filesystem::path& outputPath,
     const std::vector<std::string>& degradations,
     double enterRecoveryBelow = kDefaultEnterRecoveryBelow,
-    double exitRecoveryAbove = kDefaultExitRecoveryAbove);
+    double exitRecoveryAbove = kDefaultExitRecoveryAbove,
+    double enterVisualInertialBelow = kDefaultEnterVisualInertialBelow,
+    double exitVisualInertialAbove = kDefaultExitVisualInertialAbove,
+    const std::vector<std::string>& configurations = {
+        "fixed_low", "fixed_high", "adaptive"},
+    std::size_t maxFrames = 0, bool visualize = false);
 void writeSummaries(const std::filesystem::path& outputPath,
                     const std::vector<RunSummary>& summaries);
 

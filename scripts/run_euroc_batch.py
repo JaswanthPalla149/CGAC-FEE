@@ -14,6 +14,7 @@ from download_euroc import validate_euroc_sequence
 
 
 DEGRADATIONS = ("none", "blur", "low_light", "noise", "sudden_dim")
+CONFIGURATIONS = ("fixed_low", "fixed_high", "adaptive")
 
 
 def find_sequences(root):
@@ -40,6 +41,17 @@ def parse_degradations(value):
             "expected a comma-separated subset of " + ",".join(DEGRADATIONS)
         )
     return degradations
+
+
+def parse_configurations(value):
+    configurations = [part.strip() for part in value.split(",") if part.strip()]
+    invalid = sorted(set(configurations) - set(CONFIGURATIONS))
+    if not configurations or invalid or len(set(configurations)) != len(configurations):
+        raise argparse.ArgumentTypeError(
+            "expected a unique comma-separated subset of "
+            + ",".join(CONFIGURATIONS)
+        )
+    return configurations
 
 
 def sha256_file(path):
@@ -78,11 +90,20 @@ def main():
                         help="campaign output directory")
     parser.add_argument("--degradations", type=parse_degradations,
                         default=list(DEGRADATIONS))
+    parser.add_argument("--configurations", type=parse_configurations,
+                        default=list(CONFIGURATIONS),
+                        help="subset of fixed_low,fixed_high,adaptive")
+    parser.add_argument("--max-frames", type=int, default=0,
+                        help="maximum frames per run; 0 processes all frames")
+    parser.add_argument("--gui", action="store_true",
+                        help="show live OpenCV visualization for each run")
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--repeats", type=int, default=1,
                         help="number of complete benchmark repetitions")
     parser.add_argument("--enter-recovery-below", type=float, default=0.48)
     parser.add_argument("--exit-recovery-above", type=float, default=0.60)
+    parser.add_argument("--enter-visual-inertial-below", type=float, default=0.40)
+    parser.add_argument("--exit-visual-inertial-above", type=float, default=0.48)
     args = parser.parse_args()
 
     benchmark = args.benchmark.resolve()
@@ -94,8 +115,18 @@ def main():
         parser.error("--threads must be a positive integer")
     if args.repeats < 1:
         parser.error("--repeats must be a positive integer")
+    if args.max_frames < 0:
+        parser.error("--max-frames must be zero or a positive integer")
     if not (0 <= args.enter_recovery_below < args.exit_recovery_above <= 1):
         parser.error("controller thresholds must satisfy 0 <= enter < exit <= 1")
+    if not (
+        0 <= args.enter_visual_inertial_below < args.enter_recovery_below
+        <= args.exit_visual_inertial_above <= 1
+    ):
+        parser.error(
+            "visual-inertial thresholds must satisfy 0 <= enter VIO < "
+            "enter recovery <= exit VIO <= 1"
+        )
     if not dataset_root.is_dir():
         parser.error(f"dataset root does not exist: {dataset_root}")
     sequences = find_sequences(dataset_root)
@@ -131,10 +162,18 @@ def main():
                 "--sequence", str(sequence),
                 "--output", str(repeat_output),
                 "--degradations", ",".join(args.degradations),
+                "--configurations", ",".join(args.configurations),
+                "--max-frames", str(args.max_frames),
                 "--threads", str(args.threads),
                 "--enter-recovery-below", str(args.enter_recovery_below),
                 "--exit-recovery-above", str(args.exit_recovery_above),
+                "--enter-visual-inertial-below",
+                str(args.enter_visual_inertial_below),
+                "--exit-visual-inertial-above",
+                str(args.exit_visual_inertial_above),
             ]
+            if args.gui:
+                command.append("--gui")
             print(
                 f"Running {sequence.name} repeat {repeat}/{args.repeats}: "
                 f"{' '.join(command)}",
@@ -165,10 +204,17 @@ def main():
             path.name: validate_euroc_sequence(path) for path in sequences
         },
         "degradations": args.degradations,
+        "configurations": args.configurations,
+        "max_frames": args.max_frames,
+        "gui": args.gui,
         "opencv_threads": args.threads,
         "repeats": args.repeats,
         "controller_enter_threshold": args.enter_recovery_below,
         "controller_exit_threshold": args.exit_recovery_above,
+        "controller_enter_visual_inertial_threshold":
+            args.enter_visual_inertial_below,
+        "controller_exit_visual_inertial_threshold":
+            args.exit_visual_inertial_above,
         "degradation_seed": 17,
         "summary_csv": str(summary_path),
     }

@@ -24,6 +24,37 @@ int main() {
     CHECK(std::abs((*rotation)(1, 1) - std::cos(1.0)) < 1e-8);
     CHECK(std::abs(cv::determinant(cv::Mat(*rotation)) - 1.0) < 1e-8);
 
+    std::vector<GyroscopeSample> acceleratingSamples;
+    for (std::int64_t timestamp = 0; timestamp <= 100000000;
+         timestamp += 10000000) {
+        acceleratingSamples.push_back(
+            {timestamp, {0.0, 0.0, 0.0}, {1.0, 0.0, 9.81}});
+    }
+    const auto preintegration = integrateInertialTranslation(
+        acceleratingSamples, 0, 100000000, cv::Matx33d::eye(),
+        cv::Matx33d::eye(), {0.0, 0.0, -9.81}, {0.0, 0.0, 0.0});
+    CHECK(preintegration.has_value());
+    CHECK(std::abs(preintegration->displacement[0] - 0.005) < 1e-9);
+    CHECK(std::abs(preintegration->displacement[2]) < 1e-9);
+    CHECK(std::abs(preintegration->velocity[0] - 0.1) < 1e-9);
+    CHECK(!integrateInertialTranslation(
+               acceleratingSamples, 0, 300000000, cv::Matx33d::eye(),
+               cv::Matx33d::eye(), {0.0, 0.0, -9.81}, {0.0, 0.0, 0.0})
+               .has_value());
+
+    const cv::Mat blankImage = cv::Mat::zeros(120, 160, CV_8UC1);
+    FeatureSLAM fallbackSlam({100.0, 100.0, 80.0, 60.0});
+    CHECK(fallbackSlam
+              .process(blankImage, 0, TrackingMode::VisualInertial)
+              .trackingSucceeded);
+    const FrameResult fallbackFrame = fallbackSlam.process(
+        blankImage, 50000000, TrackingMode::VisualInertial, std::nullopt,
+        cv::Vec3d(0.005, 0.0, 0.0));
+    CHECK(!fallbackFrame.trackingSucceeded);
+    CHECK(fallbackFrame.inertialFallback);
+    CHECK(std::abs(fallbackFrame.position[0] - 0.005) < 1e-12);
+    CHECK(std::abs(fallbackSlam.correctedFramePositions()[1][0]) < 1e-12);
+
     CHECK(!integrateGyroscopeRotation(
                samples, -1, 500000000, cv::Matx33d::eye())
                .has_value());
@@ -72,6 +103,8 @@ int main() {
     const EuRoCSequence sequence = loadEuRoC(tempRoot);
     CHECK(sequence.frames.size() == 2);
     CHECK(sequence.gyroscope.size() == 3);
+    CHECK(std::abs(sequence.gyroscope[1].linearAcceleration[2] - 9.81) <
+          1e-12);
     CHECK(std::abs(sequence.camera.distortion[0] + 0.1) < 1e-12);
     CHECK(std::abs(sequence.cameraFromImu(0, 1) + 1.0) < 1e-12);
     CHECK(std::abs(sequence.cameraFromImu(1, 0) - 1.0) < 1e-12);

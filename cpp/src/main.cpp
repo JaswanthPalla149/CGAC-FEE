@@ -390,10 +390,16 @@ void printUsage(const char* executable) {
     std::cout
         << "Usage: " << executable
         << " --sequence PATH [--output PATH] [--degradations LIST] [--threads N]"
+           " [--configurations LIST] [--max-frames N]"
            " [--enter-recovery-below VALUE] [--exit-recovery-above VALUE]"
+           " [--enter-visual-inertial-below VALUE]"
+           " [--exit-visual-inertial-above VALUE]"
            " [--uav-hybrid] [--test-shock SHOCK] [--fps N] [--gui]\n"
         << "  LIST: comma-separated none,blur,low_light,noise,sudden_dim\n"
+        << "  Configurations: fixed_low,fixed_high,adaptive (default: all)\n"
+        << "  --max-frames limits evaluator frames; default processes all frames\n"
         << "  Controller defaults: enter below 0.48, exit above 0.60 (provisional)\n"
+        << "  Visual-inertial defaults: enter below 0.40, exit above 0.48\n"
         << "  SHOCK: blackout, solar_flare, strobe\n"
         << "  Example: " << executable
         << " --sequence synthetic/ecolivo-wsl --output results/ecolivo --uav-hybrid --fps 10\n";
@@ -406,9 +412,16 @@ int main(int argc, char** argv) {
         std::filesystem::path sequencePath;
         std::filesystem::path outputPath{"results"};
         std::vector<std::string> degradations{"none"};
+        std::vector<std::string> configurations{
+            "fixed_low", "fixed_high", "adaptive"};
+        std::size_t maxFrames = 0;
         int threads = 1;
         double enterRecoveryBelow = adaptive_slam::kDefaultEnterRecoveryBelow;
         double exitRecoveryAbove = adaptive_slam::kDefaultExitRecoveryAbove;
+        double enterVisualInertialBelow =
+            adaptive_slam::kDefaultEnterVisualInertialBelow;
+        double exitVisualInertialAbove =
+            adaptive_slam::kDefaultExitVisualInertialAbove;
         bool runUavHybrid = false;
         bool enableGui = false;
         std::string testShock;
@@ -451,12 +464,32 @@ int main(int argc, char** argv) {
                 outputPath = value;
             } else if (argument == "--degradations") {
                 degradations = splitList(value);
+            } else if (argument == "--configurations") {
+                configurations = splitList(value);
+            } else if (argument == "--max-frames") {
+                if (value.empty() || value.front() == '-') {
+                    throw std::invalid_argument(
+                        "--max-frames must be a positive integer");
+                }
+                std::size_t parsedLength = 0;
+                const unsigned long long parsed =
+                    std::stoull(value, &parsedLength);
+                if (parsedLength != value.size() ||
+                    parsed > std::numeric_limits<std::size_t>::max()) {
+                    throw std::invalid_argument(
+                        "--max-frames must be zero or a positive integer");
+                }
+                maxFrames = static_cast<std::size_t>(parsed);
             } else if (argument == "--threads") {
                 threads = std::stoi(value);
             } else if (argument == "--enter-recovery-below") {
                 enterRecoveryBelow = std::stod(value);
             } else if (argument == "--exit-recovery-above") {
                 exitRecoveryAbove = std::stod(value);
+            } else if (argument == "--enter-visual-inertial-below") {
+                enterVisualInertialBelow = std::stod(value);
+            } else if (argument == "--exit-visual-inertial-above") {
+                exitVisualInertialAbove = std::stod(value);
             } else if (argument == "--test-shock") {
                 testShock = value;
                 runUavHybrid = true;
@@ -477,6 +510,14 @@ int main(int argc, char** argv) {
         if (replayFps < 0.0 || replayFps > 240.0) {
             throw std::invalid_argument("--fps must be between 0 and 240");
         }
+        if (configurations.empty()) {
+            throw std::invalid_argument(
+                "--configurations must select at least one mode");
+        }
+        adaptive_slam::AdaptiveController thresholdCheck(
+            enterRecoveryBelow, exitRecoveryAbove, enterVisualInertialBelow,
+            exitVisualInertialAbove);
+        static_cast<void>(thresholdCheck);
 
         cv::setUseOptimized(true);
         cv::setNumThreads(threads);
@@ -687,7 +728,8 @@ int main(int argc, char** argv) {
 
         const auto summaries = adaptive_slam::runBenchmark(
             sequencePath, outputPath, degradations, enterRecoveryBelow,
-            exitRecoveryAbove);
+            exitRecoveryAbove, enterVisualInertialBelow,
+            exitVisualInertialAbove, configurations, maxFrames, enableGui);
         for (const auto& summary : summaries) {
             std::cout << std::setw(10) << summary.configuration << " / "
                       << std::setw(9) << std::left << summary.degradation

@@ -21,6 +21,16 @@ int main() {
             TrackingMode::LowCost) {
         return 1;
     }
+    if (controller.choose(0.24, TrackingMode::LowCost, true) !=
+            TrackingMode::VisualInertial ||
+        controller.choose(0.40, TrackingMode::VisualInertial, true) !=
+            TrackingMode::VisualInertial ||
+        controller.choose(0.50, TrackingMode::VisualInertial, true) !=
+            TrackingMode::Recovery ||
+        controller.choose(0.20, TrackingMode::VisualInertial, false) !=
+            TrackingMode::Recovery) {
+        return 3;
+    }
 
     bool invalidConfidenceRejected = false;
     try {
@@ -28,5 +38,11 @@ int main() {
     } catch (const std::invalid_argument&) {
         invalidConfidenceRejected = true;
     }
-    return invalidConfidenceRejected ? 0 : 2;
+    bool invalidModeRejected = false;
+    try {
+        controller.choose(0.5, static_cast<TrackingMode>(99), true);
+    } catch (const std::invalid_argument&) {
+        invalidModeRejected = true;
+    }
+    return invalidConfidenceRejected && invalidModeRejected ? 0 : 2;
 }
